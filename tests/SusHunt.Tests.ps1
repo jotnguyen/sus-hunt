@@ -400,4 +400,197 @@ InModuleScope SusHunt {
             (ConvertFrom-YaraOutput @('Rule2 C:\x\y.exe')).Path | Should Be 'C:\x\y.exe'
         }
     }
+
+    Describe 'gui: pure helpers' {
+        $sig = New-Signal -Rule 'ExtensionMismatch' -Points 40 -Attack 'T1036.008' -Why 'A program named like a document.' -Evidence 'MZ header in .txt'
+        $finding = New-Finding -Category 'File' -Name 'notes.txt' -Id ('A' * 64) -Path 'C:\Users\someone\AppData\Local\Temp\notes.txt' -Context 'size 1 bytes' -Signals @($sig)
+
+        It 'flattens a finding and keeps the original' {
+            $r = ConvertTo-SusGridRow $finding
+            $r.Kind | Should Be 'Finding'
+            $r.Severity | Should Be 'Medium'
+            $r.Summary | Should Be 'ExtensionMismatch'
+            $r.Item.Id | Should Be ('A' * 64)
+        }
+        It 'uses the change type as the severity of a diff row' {
+            $c = [pscustomobject]@{ PSTypeName = 'SusHunt.Change'; Change = 'Added'; Kind = 'Autorun'; Key = 'Run\x'; Before = $null; After = 'C:\x.exe' }
+            $r = ConvertTo-SusGridRow $c
+            $r.Severity | Should Be 'Added'
+            $r.Summary | Should Be 'C:\x.exe'
+        }
+        It 'gives connections no severity, so the severity ticks never hide them' {
+            $c = [pscustomobject]@{ PSTypeName = 'SusHunt.Connection'; Protocol = 'TCP'; State = 'Established'; Local = '10.0.0.2:5000'
+                Remote = '1.1.1.1:443'; Scope = 'Public'; Signature = 'Valid'; PID = 42; Process = 'app.exe'; Path = 'C:\app.exe'; Note = $null }
+            $r = ConvertTo-SusGridRow $c
+            $r.Name | Should Be 'app.exe (42)'
+            Test-SusRowFilter $r '' @() | Should Be $true
+        }
+        It 'turns plain output (the baseline path) into a text row' {
+            (ConvertTo-SusGridRow 'C:\x\baseline_1.json').Kind | Should Be 'Text'
+        }
+
+        It 'filters by severity' {
+            $r = ConvertTo-SusGridRow $finding
+            Test-SusRowFilter $r '' @('High', 'Medium') | Should Be $true
+            Test-SusRowFilter $r '' @('High', 'Low') | Should Be $false
+        }
+        It 'filters by text in Name, Path or Summary, ignoring case' {
+            $r = ConvertTo-SusGridRow $finding
+            Test-SusRowFilter $r 'NOTES' @('Medium') | Should Be $true
+            Test-SusRowFilter $r 'appdata\local' @('Medium') | Should Be $true
+            Test-SusRowFilter $r 'extensionmis' @('Medium') | Should Be $true
+            Test-SusRowFilter $r 'invoice' @('Medium') | Should Be $false
+        }
+        It 'treats filter text literally, not as a wildcard' {
+            Test-SusRowFilter (ConvertTo-SusGridRow $finding) 'no*es' @('Medium') | Should Be $false
+        }
+
+        It 'shows Days and Extra folder only for Files' {
+            ((Get-SusScanOption 'Files').Options -join ',') | Should Be 'MinScore,Days,Path'
+            ((Get-SusScanOption 'Triage').Options -join ',') | Should Be 'MinScore'
+            (Get-SusScanOption 'Autoruns').Options.Count | Should Be 0
+        }
+        It 'uses the same default thresholds as the CLI' {
+            (Get-SusScanOption 'Triage').MinScore | Should Be 20
+            (Get-SusScanOption 'Files').MinScore | Should Be 15
+        }
+        It 'has no HTML report for connections or baseline' {
+            (Get-SusScanOption 'Connections').Report | Should BeNullOrEmpty
+            (Get-SusScanOption 'Baseline').Report | Should BeNullOrEmpty
+        }
+        It 'rejects an unknown scan' {
+            { Get-SusScanOption 'Nope' } | Should Throw
+        }
+        It 'only calls exported module functions from the scan runspace' {
+            $exported = @((Get-Module SusHunt).ExportedFunctions.Keys)
+            $called = @([regex]::Matches($script:GuiScanScript, '\b[A-Z][a-z]+-Sus[A-Za-z]+\b') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+            $called.Count | Should BeGreaterThan 5
+            foreach ($c in $called) { $exported -contains $c | Should Be $true }
+        }
+
+        It 'lists the same fields and signals as the HTML report, with the ATT&CK link' {
+            $lines = @(Get-SusDetailLine (ConvertTo-SusGridRow $finding))
+            ($lines | Where-Object { $_.Label -eq 'Path' }).Text | Should Be $finding.Path
+            $s = $lines | Where-Object { $_.Link }
+            $s.Link | Should Be 'T1036.008'
+            $s.Url | Should Be 'https://attack.mitre.org/techniques/T1036/008/'
+            $s.Text | Should Be 'ExtensionMismatch: A program named like a document.'
+            ($lines | Where-Object { $_.Label -match 'evidence' }).Text | Should Be 'MZ header in .txt'
+            (ConvertTo-SusFindingHtml @($finding)) -match [regex]::Escape('https://attack.mitre.org/techniques/T1036/008/') | Should Be $true
+        }
+
+        It 'appends an allowlist entry once, with wildcards escaped' {
+            $file = Join-Path $TestDrive 'allowlist.txt'
+            '# comment' | Set-Content -LiteralPath $file -Encoding Ascii
+            Add-SusAllowlistEntry -Path 'C:\Temp\a[1].exe' -File $file | Should Be $true
+            Add-SusAllowlistEntry -Path 'c:\temp\A[1].EXE' -File $file | Should Be $false
+            $lines = @(Get-Content -LiteralPath $file)
+            $lines.Count | Should Be 2
+            $lines[1] | Should Be 'C:\Temp\a`[1`].exe'
+            $f = [pscustomobject]@{ Path = 'C:\Temp\a[1].exe'; Name = 'a[1].exe' }
+            Test-Allowlisted $f @($lines[1]) | Should Be $true
+        }
+        It 'creates the allowlist file when it is missing' {
+            $file = Join-Path $TestDrive 'new-allowlist.txt'
+            Add-SusAllowlistEntry -Path 'C:\x.exe' -File $file | Should Be $true
+            @(Get-Content -LiteralPath $file) -join '|' | Should Be 'C:\x.exe'
+        }
+        It 'starts a new line when the file does not end with one' {
+            $file = Join-Path $TestDrive 'noeol.txt'
+            [IO.File]::WriteAllText($file, 'C:\first.exe')
+            $null = Add-SusAllowlistEntry -Path 'C:\second.exe' -File $file
+            @(Get-Content -LiteralPath $file) -join '|' | Should Be 'C:\first.exe|C:\second.exe'
+        }
+
+        It 'uses the report colours for light and dark' {
+            (Get-SusGuiPalette $false).High | Should Be '#c62828'
+            (Get-SusGuiPalette $true).High | Should Be '#ff6b6b'
+        }
+        It 'loads the window layout as plain XAML with no code or event hooks' {
+            $text = Get-Content -LiteralPath (Join-Path (Get-Module SusHunt).ModuleBase 'lib\Gui.xaml') -Raw
+            [xml]$text | Should Not BeNullOrEmpty
+            $text -match 'x:Class|x:Code|Click=' | Should Be $false
+        }
+    }
+
+    Describe 'gui: scan runner (real runspaces, tiny scripts)' {
+        # Polls like the window's timer does, until the state is one of $Until or 15 s pass.
+        function Wait-Scan {
+            param($Runner, [string[]]$Until)
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $items = @()
+            do {
+                $u = Update-SusScan $Runner
+                $items += $u.Items
+                if ($Until -contains $u.State) { break }
+                Start-Sleep -Milliseconds 50
+            } while ($clock.Elapsed.TotalSeconds -lt 15)
+            $u | Add-Member -NotePropertyName AllItems -NotePropertyValue $items -PassThru
+        }
+
+        It 'is idle with nothing started, and a tick does not throw on the empty cancel list' {
+            $u = Update-SusScan (New-SusScanRunner)
+            $u.State | Should Be 'Idle'
+            $u.Busy | Should Be $false
+        }
+        It 'collects every output item and finishes' {
+            $runner = New-SusScanRunner
+            Start-SusScan $runner 'T' 'param($n) 1..$n | ForEach-Object { Write-Progress -Activity a -Status "item $_"; $_ }' @(3) | Should Be $true
+            $u = Wait-Scan $runner 'Finished', 'Failed'
+            $u.State | Should Be 'Finished'
+            ($u.AllItems -join ',') | Should Be '1,2,3'
+            $u.Busy | Should Be $false
+            $runner.Job | Should BeNullOrEmpty
+        }
+        It 'passes several arguments in order, like the real scan script' {
+            $runner = New-SusScanRunner
+            $null = Start-SusScan $runner 'T' 'param($a, $b, $c) "$a|$b|$($c.Days)"' @('m.psm1', 'Files', @{ Days = 1 })
+            (Wait-Scan $runner 'Finished').AllItems | Should Be 'm.psm1|Files|1'
+        }
+        It 'refuses a second scan while one runs, then shows its progress' {
+            $runner = New-SusScanRunner
+            $null = Start-SusScan $runner 'Slow' 'Write-Progress -Activity a -Status halfway; Start-Sleep 30'
+            Start-SusScan $runner 'Other' '1' | Should Be $false
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            do { $u = Update-SusScan $runner; Start-Sleep -Milliseconds 50 } while ($u.Progress -ne 'halfway' -and $clock.Elapsed.TotalSeconds -lt 15)
+            $u.State | Should Be 'Running'
+            $u.Scan | Should Be 'Slow'
+            $u.Progress | Should Be 'halfway'
+            $null = Stop-SusScan $runner
+        }
+        It 'detaches a cancelled scan at once and frees it on a later tick' {
+            $runner = New-SusScanRunner
+            $null = Start-SusScan $runner 'Slow' 'Start-Sleep 30'
+            $job = Stop-SusScan $runner
+            $job.Scan | Should Be 'Slow'
+            $runner.Job | Should BeNullOrEmpty
+            $runner.Stopping.Count | Should Be 1
+            Start-SusScan $runner 'Next' '"next"' | Should Be $true   # Run works again right away
+            $u = Wait-Scan $runner 'Finished'
+            $u.AllItems | Should Be 'next'
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            while ($runner.Stopping.Count -and $clock.Elapsed.TotalSeconds -lt 15) { $u = Update-SusScan $runner; Start-Sleep -Milliseconds 50 }
+            $runner.Stopping.Count | Should Be 0
+            $u.Busy | Should Be $false
+        }
+        It 'returns nothing when Cancel is pressed with no scan running' {
+            Stop-SusScan (New-SusScanRunner) | Should BeNullOrEmpty
+        }
+        It 'reports a scan that throws as Failed, with the message' {
+            $runner = New-SusScanRunner
+            $null = Start-SusScan $runner 'Bad' 'throw "boom"'
+            $u = Wait-Scan $runner 'Finished', 'Failed'
+            $u.State | Should Be 'Failed'
+            $u.Message | Should Match 'boom'
+            $runner.Job | Should BeNullOrEmpty
+        }
+        It 'finishes with the first error as the message when a scan writes a non-fatal error' {
+            $runner = New-SusScanRunner
+            $null = Start-SusScan $runner 'Soft' 'Write-Error "soft"; "kept"'
+            $u = Wait-Scan $runner 'Finished', 'Failed'
+            $u.State | Should Be 'Finished'
+            $u.Message | Should Match 'soft'
+            $u.AllItems | Should Be 'kept'
+        }
+    }
 }

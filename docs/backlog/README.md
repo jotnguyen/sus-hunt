@@ -14,7 +14,7 @@ and the order.
 | [TICKET-004](tickets/TICKET-004-event-log-hunt.md) | `events` command: hunt the built-in Windows logs without Sysmon | medium | 2 | backlog |
 | [TICKET-005](tickets/TICKET-005-coverage-gaps.md) | New autostart sources: COM hijacks, kernel drivers (BYOVD), browser extensions, DLL search order | medium | 2 | backlog |
 | [TICKET-006](tickets/TICKET-006-named-pipes.md) | Named pipes: known C2 and lateral-movement pipe names | low | 3 | backlog |
-| [TICKET-007](tickets/TICKET-007-gui.md) | `gui` command: WPF window over the existing scans (pick, run, sort, click into findings) | medium | 2 | backlog |
+| [TICKET-007](tickets/TICKET-007-gui.md) | `gui` command: WPF window over the existing scans (pick, run, sort, click into findings) | medium | 2 | in review |
 
 These are ideas 1-6 from the 2026-09-25 roadmap discussion, renumbered into sprint order:
 idea 6 (heartbeat) → 001, 1 (file scan) → 002, 2 (Defender) → 003, 3 (event logs) → 004,
