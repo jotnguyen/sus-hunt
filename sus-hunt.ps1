@@ -10,17 +10,21 @@
     autoruns  Every autostart entry, scored or not (an inventory, like Sysinternals Autoruns).
     baseline  Save a snapshot of autoruns, listeners and running programs (with file hashes).
     diff      Compare the machine now against the newest baseline.
+    files     Recent programs, scripts, shortcuts and disk images in folders any user can write to.
+              -Days N (default 7), -Path for extra folders, -Yara <rules> if yara64.exe is installed.
 .EXAMPLE
     .\sus-hunt.ps1 triage -Html -Open
 .EXAMPLE
     .\sus-hunt.ps1 baseline; .\sus-hunt.ps1 diff -Html -Open
 .EXAMPLE
     .\sus-hunt.ps1 sysmon -Hours 24
+.EXAMPLE
+    .\sus-hunt.ps1 files -Days 1 -Html -Open
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('triage', 'watch', 'sysmon', 'conns', 'autoruns', 'baseline', 'diff')]
+    [ValidateSet('triage', 'watch', 'sysmon', 'conns', 'autoruns', 'baseline', 'diff', 'files')]
     [string]$Command = 'triage',
     [int]$MinScore = 20,
     [string]$OutDir,
@@ -31,7 +35,11 @@ param(
     [switch]$AllNetwork,
     [switch]$ResolveDns,
     [switch]$Html,
-    [switch]$Open
+    [switch]$Open,
+    [int]$Days = 7,
+    [string[]]$Path,
+    [string]$Yara,
+    [string]$YaraExe
 )
 
 Import-Module (Join-Path $PSScriptRoot 'SusHunt.psm1') -Force
@@ -73,5 +81,19 @@ switch ($Command) {
         if ($Html) { Save-SusHtml (ConvertTo-SusChangeHtml $changes) (Join-Path $reportDir "diff_$stamp.html") -Open:$Open }
         if (-not $changes.Count) { Write-Host 'No changes since the baseline.' -ForegroundColor Green; return }
         $changes | Sort-Object Change, Kind | Format-Table Change, Kind, Key, After -AutoSize -Wrap | Out-Host
+    }
+    'files' {
+        # Downloaded installers score 15 (Low), so show Low by default here.
+        $min = if ($PSBoundParameters.ContainsKey('MinScore')) { $MinScore } else { 15 }
+        $findings = @(Get-SusFileFinding -Days $Days -Path $Path -Yara $Yara -YaraExe $YaraExe -MinScore $min |
+            Sort-Object Score -Descending)
+        if ($Html) { Save-SusHtml (ConvertTo-SusFindingHtml $findings 'SusHunt files') (Join-Path $reportDir "files_$stamp.html") -Open:$Open }
+        if (-not $findings.Count) {
+            Write-Host "No file in the last $Days day(s) scored $min or higher." -ForegroundColor Green
+            return
+        }
+        $findings | Format-Table Score, Severity, Name, Summary, Path -AutoSize -Wrap | Out-Host
+        Write-Host 'Why these scored (top 10):' -ForegroundColor Cyan
+        Show-SusFindingDetail ($findings | Select-Object -First 10)
     }
 }

@@ -6,7 +6,7 @@ Facts a new session would otherwise rediscover the hard way. Edit in place.
   200-800 ms, and `Get-NetTCPConnection` costs about 800 ms. `watch` uses Toolhelp,
   `NtQuerySystemInformation` and `GetExtendedTcpTable` through `lib/Native.ps1` instead (about
   1-3 ms). Do not reintroduce WMI calls inside a per-tick path.
-- **Native types are versioned** (`SusHunt.V3`). `Add-Type` cannot replace a loaded type, so
+- **Native types are versioned** (`SusHunt.V4`). `Add-Type` cannot replace a loaded type, so
   re-importing the module after a C# change fails unless the namespace changes.
 - **Signature checks are slow on big binaries** (Authenticode hashes the whole file; Electron apps
   run to 200 MB). They run on a runspace pool (`Initialize-SignatureCache`,
@@ -23,3 +23,11 @@ Facts a new session would otherwise rediscover the hard way. Edit in place.
   (event logs without Sysmon) should reuse it and `ConvertFrom-SysmonEventXml`, which already
   flattens any event's `<Data Name=...>` fields.
 - **Test fixtures use `C:\Users\someone\`.** The hygiene gate allows that placeholder, so reuse it.
+- **Antivirus makes the first open of a file slow** (up to ~100 ms for a `.js`, ~2 ms after that).
+  A scanner that opens thousands of files must open as few as it can and do it in parallel
+  (`ReadHeads` in `lib/Native.ps1`). `files` never opens scripts or shortcuts to sniff them.
+- **PowerShell loops are too slow for bulk bytes or big folder trees.** A walk of AppData with a
+  PowerShell `foreach` took about 3 minutes, and a byte histogram of a few MB took seconds. Both
+  are C# now (`FindRecentFiles`, `ShannonEntropy`).
+- **The Bash tool eats backslashes in heredocs.** When a script edits files that contain regexes
+  or Windows paths, write it to a file with the Write tool first, then run it.

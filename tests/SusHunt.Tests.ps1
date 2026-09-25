@@ -173,25 +173,25 @@ InModuleScope SusHunt {
         Initialize-SusNative
         It 'describes a process the same way WMI does' {
             $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
-            $me = [SusHunt.V3.Win32]::DescribePid($PID)
+            $me = [SusHunt.V4.Win32]::DescribePid($PID)
             $me.ExecutablePath | Should Be $cim.ExecutablePath
             $me.CommandLine | Should Be $cim.CommandLine
             $me.ParentProcessId | Should Be $cim.ParentProcessId
         }
         It 'reports a new process once, with its parent' {
-            [SusHunt.V3.Win32]::ResetProcessPolling()
-            $null = [SusHunt.V3.Win32]::PollNewProcesses()
+            [SusHunt.V4.Win32]::ResetProcessPolling()
+            $null = [SusHunt.V4.Win32]::PollNewProcesses()
             $p = Start-Process ping.exe -ArgumentList '-n', '3', '127.0.0.1' -WindowStyle Hidden -PassThru
             try {
                 Start-Sleep -Milliseconds 300
-                $first = @([SusHunt.V3.Win32]::PollNewProcesses() | Where-Object { $_.ProcessId -eq $p.Id })
+                $first = @([SusHunt.V4.Win32]::PollNewProcesses() | Where-Object { $_.ProcessId -eq $p.Id })
                 $first.Count | Should Be 1
                 $first[0].ParentProcessId | Should Be $PID
-                @([SusHunt.V3.Win32]::PollNewProcesses() | Where-Object { $_.ProcessId -eq $p.Id }).Count | Should Be 0
+                @([SusHunt.V4.Win32]::PollNewProcesses() | Where-Object { $_.ProcessId -eq $p.Id }).Count | Should Be 0
             } finally { $p.WaitForExit(5000) | Out-Null }
         }
         It 'lists TCP connections with owners' {
-            $rows = @([SusHunt.V3.Win32]::GetTcpConnections())
+            $rows = @([SusHunt.V4.Win32]::GetTcpConnections())
             $rows.Count | Should BeGreaterThan 0
             @($rows | Where-Object { $_.State -eq 'Listen' }).Count | Should BeGreaterThan 0
         }
@@ -239,6 +239,165 @@ InModuleScope SusHunt {
                 if ($r.Type -eq 'BEACON') { $result = $r }
             }
             $result | Should Not BeNullOrEmpty
+        }
+    }
+
+    Describe 'files: entropy' {
+        It 'is 0 for all zeros' { Get-ShannonEntropy (New-Object byte[] 4096) | Should Be 0 }
+        It 'is 8 when all 256 byte values appear equally often' {
+            [Math]::Round((Get-ShannonEntropy ([byte[]](0..255))), 6) | Should Be 8
+        }
+        It 'honours offset and count' {
+            $b = [byte[]](@(0) * 256 + (0..255))
+            [Math]::Round((Get-ShannonEntropy $b 256 256), 6) | Should Be 8
+        }
+    }
+
+    Describe 'files: PE parser' {
+        # A minimal 64-bit DLL header, built by hand: DOS header, PE signature, COFF header,
+        # optional header (0xF0 bytes) and a two-entry section table. No real binary in the repo.
+        function New-TestPe {
+            $b = New-Object byte[] 0x200
+            $b[0] = 0x4D; $b[1] = 0x5A                                              # 'MZ'
+            [BitConverter]::GetBytes([int]0x80).CopyTo($b, 0x3C)                    # e_lfanew
+            $b[0x80] = 0x50; $b[0x81] = 0x45                                        # 'PE\0\0'
+            [BitConverter]::GetBytes([uint16]0x8664).CopyTo($b, 0x84)               # machine x64
+            [BitConverter]::GetBytes([uint16]2).CopyTo($b, 0x86)                    # 2 sections
+            [BitConverter]::GetBytes([uint32]1700000000).CopyTo($b, 0x88)           # 2023-11-14
+            [BitConverter]::GetBytes([uint16]0xF0).CopyTo($b, 0x94)                 # optional header size
+            [BitConverter]::GetBytes([uint16]0x2022).CopyTo($b, 0x96)               # DLL | EXECUTABLE
+            [BitConverter]::GetBytes([uint16]0x20B).CopyTo($b, 0x98)                # PE32+
+            $t = 0x98 + 0xF0
+            [Text.Encoding]::ASCII.GetBytes('.text').CopyTo($b, $t)
+            [BitConverter]::GetBytes([uint32]0x100).CopyTo($b, $t + 16)
+            [BitConverter]::GetBytes([uint32]0x400).CopyTo($b, $t + 20)
+            [BitConverter]::GetBytes([uint32]0x60000020).CopyTo($b, $t + 36)        # code, execute, read
+            [Text.Encoding]::ASCII.GetBytes('.data').CopyTo($b, $t + 40)
+            [BitConverter]::GetBytes([uint32]0xC0000040L).CopyTo($b, $t + 76)        # data, read, write
+            , $b
+        }
+        $pe = Get-PeInfo (New-TestPe)
+
+        It 'reads the machine type' { $pe.Machine | Should Be 'x64' }
+        It 'knows PE32+ from the optional header magic' { $pe.Is64 | Should Be $true }
+        It 'knows a DLL from the COFF flags' { $pe.IsDll | Should Be $true }
+        It 'turns TimeDateStamp into a UTC date' { $pe.CompileTime.ToString('yyyy-MM-dd') | Should Be '2023-11-14' }
+        It 'reads the section table' {
+            $pe.Sections.Count | Should Be 2
+            $pe.Sections[0].Name | Should Be '.text'
+            $pe.Sections[0].RawOffset | Should Be 0x400
+        }
+        It 'marks only code sections executable' {
+            $pe.Sections[0].Executable | Should Be $true
+            $pe.Sections[1].Executable | Should Be $false
+        }
+        It 'returns nothing for a non-PE file' {
+            Get-PeInfo ([Text.Encoding]::ASCII.GetBytes('hello world, not a program. ' * 4)) | Should BeNullOrEmpty
+        }
+        It 'returns nothing for MZ without a PE signature' {
+            $b = New-TestPe; $b[0x80] = 0
+            Get-PeInfo $b | Should BeNullOrEmpty
+        }
+        It 'flags a section table cut off by a short read' {
+            $b = New-TestPe; [Array]::Resize([ref]$b, 0x1A0)
+            (Get-PeInfo $b).Truncated | Should Be $true
+        }
+    }
+
+    Describe 'files: Mark-of-the-Web' {
+        It 'reads ZoneId and URLs from a Zone.Identifier stream' {
+            $z = ConvertFrom-ZoneIdentifier "[ZoneTransfer]`r`nZoneId=3`r`nReferrerUrl=https://example.com/page`r`nHostUrl=https://example.com/setup.exe`r`n"
+            $z.ZoneId | Should Be 3
+            $z.HostUrl | Should Be 'https://example.com/setup.exe'
+            $z.ReferrerUrl | Should Be 'https://example.com/page'
+        }
+        It 'returns nothing for empty text' { ConvertFrom-ZoneIdentifier '' | Should BeNullOrEmpty }
+    }
+
+    Describe 'files: extension mismatch' {
+        $mz = [byte[]](0x4D, 0x5A, 0x90, 0)
+        It 'flags a program named like a text file' { Test-ExtensionMismatch 'notes.txt' $mz | Should Be $true }
+        It 'leaves a real .exe alone' { Test-ExtensionMismatch 'tool.exe' $mz | Should Be $false }
+        It 'leaves a real text file alone' { Test-ExtensionMismatch 'notes.txt' ([byte[]](0x68, 0x69)) | Should Be $false }
+        It 'leaves .tmp alone (installers keep real programs there)' { Test-ExtensionMismatch 'is-1234.tmp' $mz | Should Be $false }
+    }
+
+    Describe 'files: scoring' {
+        function Get-RuleName { param([hashtable]$Info) @(Get-FileSignals $Info | ForEach-Object { $_.Rule }) }
+        $pe = [pscustomobject]@{ Machine = 'x64'; Is64 = $true; IsDll = $false; CompileTime = [datetime]'2024-01-01'; Sections = @(); Truncated = $false }
+        $web = [pscustomobject]@{ ZoneId = 3; HostUrl = 'https://example.com/a'; ReferrerUrl = $null }
+
+        It 'shares the double-extension check with processes' {
+            (Get-RuleName @{ Name = 'invoice.pdf.exe'; Path = 'C:\Users\someone\Downloads\invoice.pdf.exe' }) -contains 'DoubleExtension' | Should Be $true
+        }
+        It 'scores a downloaded disk image twice' {
+            $r = Get-RuleName @{ Name = 'invoice.iso'; Path = 'C:\Users\someone\Downloads\invoice.iso'; Zone = $web }
+            $r -contains 'DownloadedExecutable' | Should Be $true
+            $r -contains 'DiskImage' | Should Be $true
+        }
+        It 'ignores zone 2 (intranet)' {
+            $z = [pscustomobject]@{ ZoneId = 2; HostUrl = $null; ReferrerUrl = $null }
+            (Get-RuleName @{ Name = 'a.exe'; Path = 'C:\x\a.exe'; Zone = $z }).Count | Should Be 0
+        }
+        It 'scores an unsigned, packed program in Temp' {
+            $r = Get-RuleName @{ Name = 'a.exe'; Path = 'C:\Users\someone\AppData\Local\Temp\a.exe'; Pe = $pe; Risk = 'HighRisk'
+                Signature = [pscustomobject]@{ Status = 'NotSigned' }; Entropy = @{ Section = 'UPX1'; Value = 7.9 } }
+            $r -contains 'UnsignedInHighRisk' | Should Be $true
+            $r -contains 'PackedSection' | Should Be $true
+        }
+        It 'does not count packing on a signed program' {
+            $r = Get-RuleName @{ Name = 'a.exe'; Path = 'C:\x\a.exe'; Pe = $pe; Risk = 'HighRisk'
+                Signature = [pscustomobject]@{ Status = 'Valid' }; Entropy = @{ Section = '.text'; Value = 7.9 } }
+            $r.Count | Should Be 0
+        }
+        It 'flags a compile time in the future' {
+            $future = $pe.PSObject.Copy(); $future.CompileTime = [datetime]::UtcNow.AddYears(5)
+            (Get-RuleName @{ Name = 'a.exe'; Path = 'C:\x\a.exe'; Pe = $future }) -contains 'OddCompileTime' | Should Be $true
+        }
+        It 'scores a shortcut that runs encoded PowerShell' {
+            $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('Write-Output hello from a test'))
+            $r = Get-RuleName @{ Name = 'Invoice.lnk'; Path = 'C:\Users\someone\Desktop\Invoice.lnk'
+                Shortcut = @{ Target = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'; Arguments = "-w hidden -enc $enc" } }
+            $r -contains 'LnkRunsShell' | Should Be $true
+            $r -contains 'EncodedPowerShell' | Should Be $true
+        }
+        It 'leaves a shortcut to a document alone' {
+            (Get-RuleName @{ Name = 'a.lnk'; Path = 'C:\x\a.lnk'; Shortcut = @{ Target = 'C:\Users\someone\Documents\a.docx'; Arguments = '' } }).Count | Should Be 0
+        }
+        It 'flags a hidden script' {
+            (Get-RuleName @{ Name = 'u.vbs'; Path = 'C:\Users\someone\AppData\Roaming\u.vbs'; Hidden = $true }) -contains 'HiddenInUserDir' | Should Be $true
+        }
+    }
+
+    Describe 'files: walking folders' {
+        It 'skips browser caches but not program folders' {
+            Test-SkippedDir 'C:\Users\someone\AppData\Local\Google\Chrome\User Data\Default\Cache' | Should Be $true
+            Test-SkippedDir 'C:\Users\someone\AppData\Roaming\Mozilla\Firefox\Profiles\ab12.default\storage' | Should Be $true
+            Test-SkippedDir 'C:\Users\someone\AppData\Local\Programs\SomeApp' | Should Be $false
+        }
+        It 'finds recent files, including new copies of old files, and skips old ones and caches' {
+            $root = Join-Path $TestDrive 'walk'
+            $null = New-Item -ItemType Directory -Path (Join-Path $root 'sub\Cache') -Force
+            'x' | Set-Content (Join-Path $root 'sub\new.ps1')
+            'x' | Set-Content (Join-Path $root 'sub\Cache\skipped.js')
+            $old = Join-Path $root 'old.exe'; 'x' | Set-Content $old
+            (Get-Item $old).CreationTime = (Get-Date).AddDays(-30); (Get-Item $old).LastWriteTime = (Get-Date).AddDays(-30)
+            $copy = Join-Path $root 'copied.exe'; 'x' | Set-Content $copy
+            (Get-Item $copy).LastWriteTime = (Get-Date).AddDays(-30)   # Copy-Item keeps the old write time
+            $names = @(Find-RecentFile -Roots @($root) -Since (Get-Date).AddDays(-1) | ForEach-Object { $_.Name } | Sort-Object)
+            ($names -join ',') | Should Be 'copied.exe,new.ps1'
+        }
+    }
+
+    Describe 'files: YARA output' {
+        It 'reads rule, ATT&CK meta and path' {
+            $h = @(ConvertFrom-YaraOutput @('Test_Rule [attack="T1059.001",author="x"] C:\Users\someone\AppData\Local\Temp\a b.ps1'))
+            $h[0].Rule | Should Be 'Test_Rule'
+            $h[0].Attack | Should Be 'T1059.001'
+            $h[0].Path | Should Be 'C:\Users\someone\AppData\Local\Temp\a b.ps1'
+        }
+        It 'reads a line without meta' {
+            (ConvertFrom-YaraOutput @('Rule2 C:\x\y.exe')).Path | Should Be 'C:\x\y.exe'
         }
     }
 }

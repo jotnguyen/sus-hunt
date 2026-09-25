@@ -8,21 +8,27 @@
 #   About 1 ms, where Get-CimInstance Win32_Process takes ~200 ms and loads the WMI service.
 # GetTcpConnections: GetExtendedTcpTable, the API netstat -ano uses. About 1 ms, where
 #   Get-NetTCPConnection takes ~800 ms.
+# FindRecentFiles: recursive walk for the files command; a PowerShell loop is ~20x slower.
+# ReadHeads: first 4 KB of many files in parallel (antivirus makes each first open slow).
+# ShannonEntropy: byte histogram -> bits per byte, for spotting packed PE sections (lib/Files.ps1).
 # ResetTcp: SetTcpEntry with state DELETE_TCB. The TCP stack sends a RST and forgets the connection.
 #   It is the only state SetTcpEntry accepts, it needs Administrator, and it is IPv4 only.
 #
-# The namespace is versioned (SusHunt.V3) because a session cannot redefine an already-loaded type.
+# The namespace is versioned (SusHunt.V4) because a session cannot redefine an already-loaded type.
 
 function Initialize-SusNative {
-    if ('SusHunt.V3.Win32' -as [type]) { return }
+    if ('SusHunt.V4.Win32' -as [type]) { return }
     Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 
-namespace SusHunt.V3
+namespace SusHunt.V4
 {
     public class WindowInfo
     {
@@ -54,6 +60,86 @@ namespace SusHunt.V3
 
     public static class Win32
     {
+        // ---- Recent files (lib/Files.ps1) ------------------------------------------------------
+        // Walks folders by hand: one unreadable folder must not end the walk, junctions (reparse
+        // points) are skipped because AppData has loops, and cloud placeholders are skipped because
+        // reading one downloads it. A PowerShell loop over 100k+ entries takes a minute; this, seconds.
+        public static List<FileInfo> FindRecentFiles(string[] roots, DateTime sinceUtc, string[] skipDirPatterns)
+        {
+            const FileAttributes cloud = (FileAttributes)(0x1000 | 0x40000 | 0x400000); // OFFLINE, RECALL_ON_OPEN, RECALL_ON_DATA_ACCESS
+            var skip = new List<Regex>();
+            foreach (string p in skipDirPatterns ?? new string[0]) skip.Add(new Regex(p, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant));
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var stack = new Stack<string>(roots);
+            var found = new List<FileInfo>();
+            while (stack.Count > 0)
+            {
+                string dir = stack.Pop();
+                if (!seen.Add(dir)) continue;
+                try
+                {
+                    foreach (FileSystemInfo item in new DirectoryInfo(dir).EnumerateFileSystemInfos())
+                    {
+                        FileAttributes a = item.Attributes;
+                        if ((a & FileAttributes.ReparsePoint) != 0) continue;
+                        if ((a & FileAttributes.Directory) != 0)
+                        {
+                            bool skipped = false;
+                            foreach (Regex rx in skip) { if (rx.IsMatch(item.FullName)) { skipped = true; break; } }
+                            if (!skipped) stack.Push(item.FullName);
+                            continue;
+                        }
+                        if ((a & cloud) != 0) continue;
+                        if (item.LastWriteTimeUtc >= sinceUtc || item.CreationTimeUtc >= sinceUtc) found.Add((FileInfo)item);
+                    }
+                }
+                catch (Exception) { }   // access denied, or the folder vanished mid-walk
+            }
+            return found;
+        }
+
+        // First bytes of many files, 8 at a time. Antivirus scans a file the first time anything
+        // opens it, so reading thousands of headers one by one is slow for reasons outside our code.
+        // A null entry means the file could not be read (locked, gone, access denied).
+        public static byte[][] ReadHeads(string[] paths, int count)
+        {
+            var heads = new byte[paths.Length][];
+            Parallel.For(0, paths.Length, new ParallelOptions { MaxDegreeOfParallelism = 8 }, i =>
+            {
+                try
+                {
+                    using (var fs = new FileStream(paths[i], FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                    {
+                        var buf = new byte[(int)Math.Min((long)count, fs.Length)];
+                        int read = 0, n;
+                        while (read < buf.Length && (n = fs.Read(buf, read, buf.Length - read)) > 0) read += n;
+                        if (read < buf.Length) Array.Resize(ref buf, read);
+                        heads[i] = buf;
+                    }
+                }
+                catch (Exception) { heads[i] = null; }
+            });
+            return heads;
+        }
+
+        // ---- Shannon entropy (lib/Files.ps1) ---------------------------------------------------
+        // Bits per byte, 0..8. A PowerShell loop over a few MB of bytes takes seconds; this takes ms.
+        public static double ShannonEntropy(byte[] data, int offset, int count)
+        {
+            if (data == null || count <= 0) return 0.0;
+            long[] freq = new long[256];
+            int end = offset + count;
+            for (int i = offset; i < end; i++) freq[data[i]]++;
+            double h = 0.0;
+            for (int b = 0; b < 256; b++)
+            {
+                if (freq[b] == 0) continue;
+                double p = (double)freq[b] / count;
+                h -= p * Math.Log(p, 2.0);
+            }
+            return h;
+        }
+
         // ---- Windows -------------------------------------------------------------------------
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -397,11 +483,11 @@ function Get-NativeProcess {
     # Win32_Process-shaped object from the fast native queries, so the rest of the code does not care.
     param([int]$ProcessId, [int]$ParentProcessId = 0, [string]$Name)
     Initialize-SusNative
-    $info = New-Object SusHunt.V3.ProcessInfo
+    $info = New-Object SusHunt.V4.ProcessInfo
     $info.ProcessId = $ProcessId
     $info.ParentProcessId = $ParentProcessId
     $info.Name = $Name
-    [SusHunt.V3.Win32]::DescribeProcess($info)
+    [SusHunt.V4.Win32]::DescribeProcess($info)
     ConvertFrom-NativeProcess $info
 }
 

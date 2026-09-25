@@ -143,7 +143,7 @@ function Get-SusConnection {
     $rows = New-Object System.Collections.Generic.List[object]
     $keep = 'Listen', 'Established', 'SynSent', 'SynReceived', 'CloseWait'
     Initialize-SusNative
-    $tcp = @([SusHunt.V3.Win32]::GetTcpConnections())   # ~3 ms, vs ~800 ms for Get-NetTCPConnection
+    $tcp = @([SusHunt.V4.Win32]::GetTcpConnections())   # ~3 ms, vs ~800 ms for Get-NetTCPConnection
     $udp = @(Get-NetUDPEndpoint -ErrorAction SilentlyContinue)
     $owners = @($tcp; $udp) | ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique
     Initialize-SignatureCache @($owners | ForEach-Object { if ($Snapshot[$_]) { $Snapshot[$_].ExecutablePath } })
@@ -178,7 +178,7 @@ function Test-SameProcess {
 function Test-ConnectionStillOwned {
     param($Connection)
     Initialize-SusNative
-    [bool]([SusHunt.V3.Win32]::GetTcpConnections() | Where-Object {
+    [bool]([SusHunt.V4.Win32]::GetTcpConnections() | Where-Object {
         $_.LocalAddress -eq $Connection.LocalAddress -and $_.LocalPort -eq [int]$Connection.LocalPort -and
         $_.RemoteAddress -eq $Connection.RemoteAddress -and $_.RemotePort -eq [int]$Connection.RemotePort -and
         $_.OwningProcess -eq [int]$Connection.PID
@@ -213,7 +213,7 @@ function Stop-SusConnection {
                 if (-not $PSCmdlet.ShouldProcess($label, 'Reset TCP connection')) { return }
                 if (-not (Test-ConnectionStillOwned $c) -or -not (Test-SameProcess $c)) { Write-Error "Connection or process changed since it was listed; not touching it: $label"; return }
                 Initialize-SusNative
-                $rc = [SusHunt.V3.Win32]::ResetTcp(
+                $rc = [SusHunt.V4.Win32]::ResetTcp(
                     (ConvertTo-NetworkOrderAddress $c.LocalAddress), (ConvertTo-NetworkOrderPort $c.LocalPort),
                     (ConvertTo-NetworkOrderAddress $c.RemoteAddress), (ConvertTo-NetworkOrderPort $c.RemotePort))
                 switch ($rc) {

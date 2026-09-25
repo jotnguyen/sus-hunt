@@ -120,7 +120,7 @@ function Get-FileStamp {
     try {
         $fi = New-Object IO.FileInfo $Path
         if ($fi.Exists) { return '{0}|{1}' -f $fi.Length, $fi.LastWriteTimeUtc.Ticks }
-    } catch { }
+    } catch { Write-Verbose "cannot stat ${Path}: $($_.Exception.Message)" }
     $null
 }
 
@@ -209,7 +209,7 @@ function Receive-SignatureWarmup {
 function Stop-SignatureWarmup {
     param($Warmup)
     if (-not $Warmup -or -not $Warmup.Pool) { return }
-    foreach ($j in $Warmup.Jobs) { try { $j.Shell.Stop(); $j.Shell.Dispose() } catch { } }
+    foreach ($j in $Warmup.Jobs) { try { $j.Shell.Stop(); $j.Shell.Dispose() } catch { Write-Verbose "runspace already gone: $($_.Exception.Message)" } }
     $Warmup.Pool.Close()
     $Warmup.Pool.Dispose()
     $Warmup.Pool = $null
@@ -385,6 +385,26 @@ function Get-LookalikeName {
     }
     $script:LookalikeCache[$n] = $match
     $match
+}
+
+# Unicode bidirectional controls (U+202A-U+202E, U+2066-U+2069). Built from code points so this
+# file stays plain ASCII, which Windows PowerShell 5.1 needs to read it correctly.
+$script:BidiControls = '[{0}-{1}{2}-{3}]' -f [char]0x202A, [char]0x202E, [char]0x2066, [char]0x2069
+
+function Get-FileNameSignals {
+    # Name tricks that work the same on a running process and on a file waiting on disk.
+    param([string]$Name)
+    if (-not $Name) { return }
+    $twin = Get-LookalikeName $Name
+    if ($twin) {
+        New-Signal 'LookalikeName' 45 'T1036.005' "One letter away from the Windows program $twin. A cheap and common disguise." $Name
+    }
+    if ($Name -match '(?i)\.(pdf|docx?|xlsx?|pptx?|jpe?g|png|txt|zip|rar)\.(exe|scr|com|pif|bat|cmd|lnk|js|vbs|hta)$') {
+        New-Signal 'DoubleExtension' 40 'T1036.007' 'Explorer hides known extensions, so invoice.pdf.exe shows up as invoice.pdf.' $Name
+    }
+    if ($Name -match $script:BidiControls) {
+        New-Signal 'BidiTrick' 50 'T1036.002' 'Contains a Unicode right-to-left control character, used to make the extension read backwards.' $Name
+    }
 }
 
 function ConvertFrom-EncodedCommand {

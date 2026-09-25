@@ -5,7 +5,7 @@
 **Sprint:** 1
 **Parallelizable:** yes. It adds a new file, `lib/Files.ps1`, and appends to the hot files `sus-hunt.ps1`, `SusHunt.psm1`, `lib/Rules.ps1`, `README.md` and the tests.
 **Human-blocked:** no for the code; acceptance has human steps (plant test files, download a file in a browser). YARA is optional and needs the human to install it.
-**Status:** backlog
+**Status:** in review (branch `ticket-002-file-scan`)
 
 ## Links
 
@@ -83,9 +83,9 @@ in docs or tests.
 
 ## Acceptance criteria
 
-- [ ] `Invoke-Pester .\tests` passes, with new tests for entropy (all zeros = 0; 256 distinct
+- [x] `Invoke-Pester .\tests` passes, with new tests for entropy (all zeros = 0; 256 distinct
       bytes = 8), the PE parser, the Zone.Identifier parser and extension mismatch.
-- [ ] `tools\hygiene-gate.ps1` prints `hygiene-ok`.
+- [x] `tools\hygiene-gate.ps1` prints `hygiene-ok`.
 - [ ] Human: `Copy-Item $env:windir\System32\notepad.exe $env:TEMP\invoice.pdf.exe` and
       `Copy-Item $env:windir\System32\notepad.exe $env:TEMP\notes.txt`, run `files -Days 1`, and see
       DoubleExtension and ExtensionMismatch. Delete both files afterwards.
@@ -100,3 +100,22 @@ Revert the merge commit. There is no machine state to undo.
 ## Comments
 
 - **2026-09-25** â€” Created from the roadmap (idea 1). The owner picked it for sprint 1.
+- **2026-09-25** — Built on `ticket-002-file-scan`. Differences from the design above, and why:
+  - The folder walk, the parallel header read and the entropy loop are C# in `lib/Native.ps1`
+    (namespace bumped to `SusHunt.V4`). In PowerShell the walk took about 3 minutes and the
+    entropy loop seconds per file.
+  - Only names that could hide a program are sniffed for `MZ` (`$script:SniffExtensions`: no
+    extension, `.tmp .dat .bin`, and the document and picture names in `$script:DecoyExtensions`).
+    Opening a file the first time costs up to ~100 ms because antivirus scans it, and sniffing
+    every recent file took about 10 minutes. ExtensionMismatch fires only for decoy names, since
+    `.tmp`, `.node` and similar names hold real programs all the time.
+  - Browser caches, site storage and `node_modules` are skipped (`$script:FileScanSkipDirs`).
+    One browser profile alone held over 100k small files.
+  - Programs over 32 MB get a signature check only in Temp, Downloads and Public.
+  - OddCompileTime counts only on files that are not validly signed: all of Windows uses
+    reproducible builds, which store a hash in that field.
+  - `files` defaults to `-MinScore 15`, so a downloaded installer (DownloadedExecutable, 15) shows.
+  - Timing (plan step 5): `-Days 7` took about 62 s on the dev machine (about 24 s of that is the
+    folder walk), `-Days 1` about 50 s. Runs after the first are faster.
+  - Agent check of the first human step: copies of notepad as `invoice.pdf.exe` and `notes.txt`
+    in a scratch folder scored DoubleExtension and ExtensionMismatch. The human steps are still open.

@@ -40,11 +40,14 @@ the files linked below.
   `ConvertFrom-Json -AsHashtable`, or `&&`. Use runspace pools for parallel work (see
   `Initialize-SignatureCache` in `lib/Common.ps1`).
 - **`lib/*.ps1` stay plain ASCII.** 5.1 misreads BOM-less UTF-8. Build special characters from
-  code points (see `$script:BidiControls` in `lib/Processes.ps1`).
+  code points (see `$script:BidiControls` in `lib/Common.ps1`).
 - **Rules are data.** Points, ATT&CK IDs and patterns go in `lib/Rules.ps1`. Every signal has an
   ATT&CK ID and a `Why` that teaches something. Add each new rule to the README table.
 - **C# in `lib/Native.ps1`:** `Add-Type` cannot reload a type in a live session, so if you change
-  the C#, bump the namespace (`SusHunt.V3` → `SusHunt.V4`) everywhere it is used.
+  the C#, bump the namespace (`SusHunt.V4` → `SusHunt.V5`) everywhere it is used.
+- **Lint:** `powershell -NoProfile -File tools\lint.ps1` must print `lint-ok` (PSScriptAnalyzer
+  with `PSScriptAnalyzerSettings.psd1`; it also rejects syntax newer than 5.1). Fix the code; do
+  not add exclusions to silence a real finding. CI runs lint, tests and the hygiene gate.
 - **Tests:** `Invoke-Pester .\tests` must pass. It runs on Pester 3.4, which ships with Windows, so use
   `Should Be`, not `Should -Be`. Test the pure logic (parsers, scoring, math) with synthetic input;
   do not write tests that depend on this machine's state.
@@ -57,7 +60,8 @@ the files linked below.
   "Generated with Claude Code" to commits or PR descriptions. `.claude/settings.json` turns it
   off; strip it by hand if it appears anyway. The hygiene gate checks every commit message, so run
   it again before pushing.
-- Branch per ticket (`ticket-NNN-<slug>`); the owner merges to `main`.
+- Branch per ticket (`ticket-NNN-<slug>`); the owner merges to `main`. GitHub deletes the branch
+  on merge (repo setting), so start the next ticket from a fresh `origin/main`.
 - Commit style follows history: plain imperative subject ("Add ...", "Make ..."), no `feat:`
   prefix, body explains why, bullets for the pieces.
 - Log what a session did in `.ai/sessions/` (skill: `session-log`).

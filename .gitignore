@@ -8,3 +8,8 @@ baselines/
 
 # Your personal allowlist (copy allowlist.example.txt to start one).
 allowlist.txt
+
+# Test results and event-log exports also carry paths and names from this machine.
+*.xml
+*.evtx
+*.etl

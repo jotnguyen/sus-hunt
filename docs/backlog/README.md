@@ -9,7 +9,7 @@ and the order.
 | Ticket | What | Priority | Sprint | Status |
 |---|---|---|---|---|
 | [TICKET-001](tickets/TICKET-001-watch-heartbeat-summary.md) | `watch`: heartbeat, sleep-gap detection, summary on exit | high | 1 | backlog |
-| [TICKET-002](tickets/TICKET-002-file-scan.md) | `files` command: recent executables in user-writable folders, Mark-of-the-Web, PE checks, optional YARA | high | 1 | backlog |
+| [TICKET-002](tickets/TICKET-002-file-scan.md) | `files` command: recent executables in user-writable folders, Mark-of-the-Web, PE checks, optional YARA | high | 1 | in review |
 | [TICKET-003](tickets/TICKET-003-defender-tamper.md) | Defender tamper check: exclusions, disabled protection, detection and config-change events | high | 1 | backlog |
 | [TICKET-004](tickets/TICKET-004-event-log-hunt.md) | `events` command: hunt the built-in Windows logs without Sysmon | medium | 2 | backlog |
 | [TICKET-005](tickets/TICKET-005-coverage-gaps.md) | New autostart sources: COM hijacks, kernel drivers (BYOVD), browser extensions, DLL search order | medium | 2 | backlog |
