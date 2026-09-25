@@ -1,0 +1,35 @@
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell   # Windows PowerShell 5.1, the version the kit targets
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # the hygiene gate reads every commit message
+
+      - name: Lint (PSScriptAnalyzer)
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          .\tools\lint.ps1
+
+      - name: Tests (Pester 3.4, as shipped with Windows)
+        run: |
+          Import-Module Pester -RequiredVersion 3.4.0
+          $r = Invoke-Pester .\tests -PassThru
+          if ($r.FailedCount -or -not $r.PassedCount) { exit 1 }
+
+      - name: Hygiene gate
+        run: .\tools\hygiene-gate.ps1
