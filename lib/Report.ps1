@@ -38,6 +38,13 @@ summary .rules { color:var(--muted); }
 .Added { color:var(--added); } .Removed { color:var(--removed); } .Changed { color:var(--medium); }
 '@
 
+function Get-AttackUrl {
+    # T1036.008 -> https://attack.mitre.org/techniques/T1036/008/ (shared by the HTML report and the GUI)
+    param([string]$Attack)
+    if (-not $Attack) { return $null }
+    'https://attack.mitre.org/techniques/' + ($Attack -replace '\.', '/') + '/'
+}
+
 function Get-HtmlPage {
     param([string]$Title, [string]$Body)
     $t = ConvertTo-HtmlText $Title
@@ -67,7 +74,7 @@ function ConvertTo-SusFindingHtml {
         foreach ($s in $f.Signals | Sort-Object Points -Descending) {
             $attack = if ($s.Attack) {
                 $id = ConvertTo-HtmlText $s.Attack
-                $url = 'https://attack.mitre.org/techniques/' + ($s.Attack -replace '\.', '/') + '/'
+                $url = Get-AttackUrl $s.Attack
                 " <a href=`"$(ConvertTo-HtmlText $url)`">$id</a>"
             } else { '' }
             $null = $sb.Append("<div class=`"sig`"><span class=`"pts`">+$($s.Points)</span>$attack <b>$(ConvertTo-HtmlText $s.Rule)</b>: $(ConvertTo-HtmlText $s.Why)")

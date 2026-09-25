@@ -2,7 +2,7 @@
 # One lib\ file per topic; the detection rules are plain data in lib\Rules.ps1.
 
 foreach ($lib in 'Native', 'Rules', 'Common', 'Network', 'Processes', 'Persistence', 'Triage', 'Watch',
-                 'Baseline', 'Report', 'Sysmon', 'Files') {
+                 'Baseline', 'Report', 'Sysmon', 'Files', 'Gui') {
     . (Join-Path $PSScriptRoot "lib\$lib.ps1")
 }
 
@@ -13,4 +13,4 @@ Update-TypeData -TypeName 'SusHunt.Change' -DefaultDisplayPropertySet Change, Ki
 Export-ModuleMember -Function Invoke-SusTriage, Show-SusFindingDetail, Get-SusProcessFinding,
     Get-SusPersistenceFinding, Get-SusConnection, Stop-SusConnection, Watch-SusActivity,
     Save-SusBaseline, Compare-SusBaseline, ConvertTo-SusFindingHtml, ConvertTo-SusChangeHtml, Save-SusHtml,
-    Watch-SusSysmon, Invoke-SysmonHunt, Get-SusFileFinding
+    Watch-SusSysmon, Invoke-SysmonHunt, Get-SusFileFinding, Show-SusGui

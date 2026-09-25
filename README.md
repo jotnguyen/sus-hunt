@@ -23,6 +23,7 @@ cd sus-hunt
 .\sus-hunt.ps1 conns               # who is talking to whom, signed or not
 .\sus-hunt.ps1 autoruns            # every autostart entry, scored or not
 .\sus-hunt.ps1 files -Html -Open   # recent programs/scripts/shortcuts in Temp, AppData, Downloads...
+.\sus-hunt.ps1 gui                 # a window: pick a scan, run it, sort and click into the results
 ```
 
 A good routine: take a `baseline` on a day you trust the machine, then run `diff` weekly or
@@ -169,6 +170,31 @@ light and dark themes, and each finding expands to show its reasons with links t
 Process names and command lines come from the machine being examined, and an attacker can
 choose them, so every value is HTML-encoded before it goes into the page.
 
+## GUI
+
+`.\sus-hunt.ps1 gui`, or double-click `tools\SusHunt.cmd`, opens a window (WPF, built into
+Windows PowerShell 5.1: nothing to install, no listening port). Pick Triage, Files, Autoruns,
+Connections, Baseline or Diff; only the options that scan uses are shown. Press Run. The scan
+runs in its own runspace, so the window stays responsive, the status line shows its progress, and
+Cancel stops it.
+
+*Screenshot placeholder: the scan buttons across the top, a results grid coloured by severity
+in the middle, and the detail pane for the selected row (signals, ATT&CK links, Why, evidence)
+with the row actions below it.*
+
+Results are a grid you can sort by any column, filter by text (Name, Path, Summary) and by
+severity. The detail pane shows the same fields and signals as the HTML report. Row actions:
+
+- **Copy SHA-256**, to look the file up by hand.
+- **Open folder** shows the file selected in Explorer (`explorer /select`). It never opens or runs it.
+- **Add to allowlist** appends the exact path to `allowlist.txt`, after a confirm.
+- **Save HTML report** writes the same report as `-Html` to `reports\`.
+
+The GUI only calls the exported scan functions, so it can never disagree with the CLI. It has no
+kill or firewall actions, and it never elevates itself: the badge at the top right says whether
+you are admin. For full coverage, start it with "Run as administrator". It follows the Windows
+light or dark app mode.
+
 ## Sysmon mode
 
 [Sysmon](https://learn.microsoft.com/sysinternals/downloads/sysmon) is a free Microsoft
@@ -273,12 +299,13 @@ The tests cover the logic that does not depend on your machine's state: CIDR mat
 byte order, edit distance, command-line rules (including decoding `-EncodedCommand`), path
 parsing and program search order, the signature cache, PID-reuse checks, HTML encoding, Sysmon
 event parsing, beacon math, and for `files`: entropy, the PE parser, Mark-of-the-Web, extension
-checks, file scoring and the folder walk.
+checks, file scoring and the folder walk; for `gui`: grid rows, the filter, per-scan options,
+the detail lines and allowlist appends.
 
 ## Layout
 
 ```
-sus-hunt.ps1          front door: triage | watch | sysmon | conns | autoruns | baseline | diff | files
+sus-hunt.ps1          front door: triage | watch | sysmon | conns | autoruns | baseline | diff | files | gui
 SusHunt.psm1          module; loads lib\
 lib\Rules.ps1         detection rules as data
 lib\Common.ps1        paths, signatures, process tree, command-line parsing, scoring
@@ -290,9 +317,11 @@ lib\Sysmon.ps1        Sysmon event parsing, live (event-driven) and look-back mo
 lib\Baseline.ps1      baseline and diff, parallel SHA-256
 lib\Report.ps1        HTML reports (all values encoded)
 lib\Files.ps1         files command: folder walk, PE parser, entropy, Mark-of-the-Web, .lnk, YARA
+lib\Gui.ps1, Gui.xaml gui command: WPF window, scans run in a runspace (no rule logic here)
 lib\Native.ps1        C# for what PowerShell lacks or does slowly (windows, processes, TCP, file walk, entropy)
 tests\                Pester tests
 tools\hygiene-gate.ps1 pre-commit check: no machine or personal details in tracked files
+tools\SusHunt.cmd     double-click launcher for the gui command
 tools\lint.ps1        PSScriptAnalyzer with PSScriptAnalyzerSettings.psd1 (5.1-compatible syntax)
 .github\workflows\    CI: lint, tests, hygiene gate
 docs\backlog\       roadmap: one ticket per planned feature

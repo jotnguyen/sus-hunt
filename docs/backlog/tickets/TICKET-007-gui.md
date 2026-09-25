@@ -5,7 +5,7 @@
 **Sprint:** 2 (see `../README.md`)
 **Parallelizable:** mostly. It adds new files (`lib/Gui.ps1`, `lib/Gui.xaml`) and appends to the hot files `sus-hunt.ps1`, `SusHunt.psm1`, `README.md` and the tests. It adds no rules. Each later command (003, 004, 005, 006) should add its own button when it lands, so merge order does not matter.
 **Human-blocked:** no for the code. The acceptance steps need a human to click through the window.
-**Status:** backlog
+**Status:** in-progress
 
 ## Links
 
@@ -154,3 +154,10 @@ through the GUI (git-ignored). Remove them by hand if you want.
 - **2026-09-25** — Created at the owner's request after TICKET-002 merged. The owner wants a GUI
   so they do not need to remember CLI flags. WPF was chosen because it ships with Windows (no
   installs) and needs no listening port.
+- **2026-09-25** - Built on branch `ticket-007-gui`. Owner defaults taken for both open questions:
+  no `watch` tab in v1 (waits for TICKET-001), and the theme follows the Windows app mode with no
+  toggle. Plan change: `$ps.Stop()` only takes effect between pipeline steps, so a Files scan inside
+  its C# folder walk took 13 s to cancel. Cancel now detaches the runspace at once (Run is back in
+  about 0.1 s), and the timer disposes it when it stops. Checked by driving the window with UI
+  Automation: Files found both planted notepad copies as Medium, the detail pane shows the signals, Why,
+  evidence and ATT&CK link, and the filter, Connections and Diff all work. Human steps still open.

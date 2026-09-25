@@ -12,6 +12,8 @@
     diff      Compare the machine now against the newest baseline.
     files     Recent programs, scripts, shortcuts and disk images in folders any user can write to.
               -Days N (default 7), -Path for extra folders, -Yara <rules> if yara64.exe is installed.
+    gui       A window to pick a scan, run it, and sort, filter and click into the results.
+              Double-click tools\SusHunt.cmd to open it without a console prompt.
 .EXAMPLE
     .\sus-hunt.ps1 triage -Html -Open
 .EXAMPLE
@@ -24,7 +26,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('triage', 'watch', 'sysmon', 'conns', 'autoruns', 'baseline', 'diff', 'files')]
+    [ValidateSet('triage', 'watch', 'sysmon', 'conns', 'autoruns', 'baseline', 'diff', 'files', 'gui')]
     [string]$Command = 'triage',
     [int]$MinScore = 20,
     [string]$OutDir,
@@ -95,5 +97,13 @@ switch ($Command) {
         $findings | Format-Table Score, Severity, Name, Summary, Path -AutoSize -Wrap | Out-Host
         Write-Host 'Why these scored (top 10):' -ForegroundColor Cyan
         Show-SusFindingDetail ($findings | Select-Object -First 10)
+    }
+    'gui' {
+        # WPF needs an STA thread. powershell.exe 5.1 is STA by default; relaunch if this one is not.
+        if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
+            & powershell.exe -NoProfile -STA -File $PSCommandPath gui
+            return
+        }
+        Show-SusGui
     }
 }
