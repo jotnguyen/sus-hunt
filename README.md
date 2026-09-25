@@ -201,7 +201,8 @@ polled), and `.\sus-hunt.ps1 sysmon -Hours 24` scores the last day of events.
   some well-known apps launch PowerShell with `-EncodedCommand`. Treat a score as a reason to
   look, not a verdict.
 * **Coverage.** It skips DLL search-order hijacking, COM hijacking, browser extensions, drivers,
-  and memory injection. Those are good next rules to write.
+  and memory injection. Those are good next rules to write; the plan is in
+  [`docs/backlog/`](docs/backlog/README.md).
 
 Where to go next: [Sysmon](https://learn.microsoft.com/sysinternals/downloads/sysmon) (event IDs
 1 process create, 3 network, 11 file create, 13 registry, 22 DNS) with a community config;
@@ -241,6 +242,9 @@ lib\Baseline.ps1      baseline and diff, parallel SHA-256
 lib\Report.ps1        HTML reports (all values encoded)
 lib\Native.ps1        the two Win32 calls PowerShell lacks (window enumeration, SetTcpEntry)
 tests\                Pester tests
+tools\hygiene-gate.ps1 pre-commit check: no machine or personal details in tracked files
+docsacklog\         roadmap: one ticket per planned feature
+CLAUDE.md, AGENTS.md  notes for AI coding agents working on this repo (.ai\, .claude\skills\)
 ```
 
 Reports, HTML pages, baselines and watch logs describe your machine. They are git-ignored by
