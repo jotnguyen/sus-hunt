@@ -169,6 +169,34 @@ InModuleScope SusHunt {
         }
     }
 
+    Describe 'native queries' {
+        Initialize-SusNative
+        It 'describes a process the same way WMI does' {
+            $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
+            $me = [SusHunt.V3.Win32]::DescribePid($PID)
+            $me.ExecutablePath | Should Be $cim.ExecutablePath
+            $me.CommandLine | Should Be $cim.CommandLine
+            $me.ParentProcessId | Should Be $cim.ParentProcessId
+        }
+        It 'reports a new process once, with its parent' {
+            [SusHunt.V3.Win32]::ResetProcessPolling()
+            $null = [SusHunt.V3.Win32]::PollNewProcesses()
+            $p = Start-Process ping.exe -ArgumentList '-n', '3', '127.0.0.1' -WindowStyle Hidden -PassThru
+            try {
+                Start-Sleep -Milliseconds 300
+                $first = @([SusHunt.V3.Win32]::PollNewProcesses() | Where-Object { $_.ProcessId -eq $p.Id })
+                $first.Count | Should Be 1
+                $first[0].ParentProcessId | Should Be $PID
+                @([SusHunt.V3.Win32]::PollNewProcesses() | Where-Object { $_.ProcessId -eq $p.Id }).Count | Should Be 0
+            } finally { $p.WaitForExit(5000) | Out-Null }
+        }
+        It 'lists TCP connections with owners' {
+            $rows = @([SusHunt.V3.Win32]::GetTcpConnections())
+            $rows.Count | Should BeGreaterThan 0
+            @($rows | Where-Object { $_.State -eq 'Listen' }).Count | Should BeGreaterThan 0
+        }
+    }
+
     Describe 'HTML report' {
         It 'encodes values so markup in a process name stays text' {
             $f = New-Finding -Category 'Process' -Name '<script>alert(1)</script>' -Signals @(New-Signal 'R' 20 'T1036.005' 'why & how' '<b>')

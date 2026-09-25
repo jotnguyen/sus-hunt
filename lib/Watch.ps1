@@ -1,36 +1,29 @@
 # Live watch: new processes, console windows that pop up, and new outbound connections.
-# Everything here polls, so it runs without Administrator. README "Limitations" covers what
-# polling can miss and what real EDR sensors do instead.
-
-function ConvertFrom-ProcessEvent {
-    param($NewEvent)
-    $now = Get-Date
-    if ($NewEvent.CimSystemProperties.ClassName -eq 'Win32_ProcessStartTrace') {
-        # The trace event only carries names and PIDs; grab the command line while the process lives.
-        $procId = [int]$NewEvent.ProcessID
-        $p = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue
-        if (-not $p) {
-            $p = [pscustomobject]@{ Name = $NewEvent.ProcessName; ProcessId = $procId; ParentProcessId = [int]$NewEvent.ParentProcessID; CommandLine = $null; ExecutablePath = $null; CreationDate = $now }
-        }
-    } else {
-        $p = $NewEvent.TargetInstance
-    }
-    [pscustomobject]@{
-        Name            = $p.Name
-        ProcessId       = [int]$p.ProcessId
-        ParentProcessId = [int]$p.ParentProcessId
-        CommandLine     = $p.CommandLine
-        ExecutablePath  = $p.ExecutablePath
-        CreationDate    = if ($p.CreationDate) { $p.CreationDate } else { $now }
-        Seen            = $now
-    }
-}
+# Uses direct Win32 queries (lib\Native.ps1), not WMI: a WMI lookup costs ~200-800 ms and
+# stalls the loop, which is how short popups get missed and log lines arrive late.
+# With admin rights the kernel process-start trace is added, so even 5 ms processes are seen.
 
 function Get-LiveProcess {
+    # Current details for a PID, or what we recorded earlier if it has already exited.
     param([int]$ProcessId, [hashtable]$Snapshot)
-    $live = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
-    if ($live) { $Snapshot[$ProcessId] = $live; return $live }
-    $Snapshot[$ProcessId]   # already exited; this is what we recorded when it started, if anything
+    $p = Get-NativeProcess -ProcessId $ProcessId
+    $known = $Snapshot[$ProcessId]
+    if ($p.CreationDate) {
+        if (-not $p.Name -and $known) { $p.Name = $known.Name }
+        $Snapshot[$ProcessId] = $p
+        return $p
+    }
+    $known
+}
+
+function Get-NativeSnapshot {
+    # Same shape as Get-ProcessSnapshot, from Toolhelp + limited queries (~1 ms per process).
+    $map = @{}
+    foreach ($info in [SusHunt.V3.Win32]::ListProcesses()) {
+        [SusHunt.V3.Win32]::DescribeProcess($info)
+        $map[[int]$info.ProcessId] = ConvertFrom-NativeProcess $info
+    }
+    $map
 }
 
 function Write-SusEvent {
@@ -77,18 +70,26 @@ function Watch-SusActivity {
     $source = 'SusHunt.ProcessStart'
     Unregister-Event -SourceIdentifier $source -ErrorAction SilentlyContinue
     if ($isAdmin) {
-        # Backed by kernel tracing: sees every start, even a process that lives for 5 ms.
+        # Kernel-backed trace: reports every start, even a process that lives for 5 ms.
         Register-CimIndicationEvent -ClassName Win32_ProcessStartTrace -SourceIdentifier $source
-    } else {
-        # WMI diffs the process list twice a second, so very short-lived processes can slip past.
-        Register-CimIndicationEvent -Query "SELECT * FROM __InstanceCreationEvent WITHIN 0.5 WHERE TargetInstance ISA 'Win32_Process'" -SourceIdentifier $source
     }
 
-    $snapshot = Get-ProcessSnapshot
+    [SusHunt.V3.Win32]::ResetProcessPolling()
+    $null = [SusHunt.V3.Win32]::PollNewProcesses()   # primes the list; returns nothing the first time
+    $nextPoll = Get-Date
+    $snapshot = Get-NativeSnapshot
+    # Seen PIDs and their image names; a known PID with a new name means the PID was reused.
+    $seen = @{}
+    foreach ($p in $snapshot.Values) { $seen[$p.ProcessId] = $p.Name }
+    # Checking signatures of big binaries takes seconds. Do it in the background (half the cores
+    # at most) and start watching straight away; results merge in as they finish.
+    $warmup = Start-SignatureWarmup @($snapshot.Values | ForEach-Object { $_.ExecutablePath })
+
     $windowClasses = [string[]]@('ConsoleWindowClass', 'CASCADIA_HOSTING_WINDOW_CLASS')
     $knownWindows = @{}
-    foreach ($w in [SusHunt.Native]::GetVisibleWindows($windowClasses)) { $knownWindows[$w.Handle] = $true }
+    foreach ($w in [SusHunt.V3.Win32]::GetVisibleWindows($windowClasses)) { $knownWindows[$w.Handle] = $true }
     $recent = New-Object System.Collections.Generic.List[object]
+    $pendingImage = New-Object System.Collections.Generic.List[object]
     $netSeen = @{}
     $netPrimed = $false
     $beaconTimes = @{}
@@ -97,32 +98,75 @@ function Watch-SusActivity {
     $nextNet = $started
     $stopAt = if ($Seconds -gt 0) { $started.AddSeconds($Seconds) } else { [datetime]::MaxValue }
 
-    $mode = if ($isAdmin) { 'kernel process trace' } else { 'WMI polling (run as admin to catch very short-lived processes)' }
-    Write-Host "SusHunt watch: processes via $mode, console windows every 100 ms, network every 2 s. Ctrl+C to stop." -ForegroundColor Cyan
+    # One place that handles a newly seen process, whichever source reported it first.
+    $onNewProcess = {
+        param([int]$ProcessId, [int]$ParentProcessId, [string]$Name)
+        if ($ProcessId -eq $PID -or ($seen.ContainsKey($ProcessId) -and $seen[$ProcessId] -eq $Name)) { return }
+        $seen[$ProcessId] = $Name
+        $now = Get-Date
+        $proc = Get-NativeProcess -ProcessId $ProcessId -ParentProcessId $ParentProcessId -Name $Name
+        if (-not $proc.CreationDate) { $proc.CreationDate = $now }   # exited already, or protected
+        $proc | Add-Member -NotePropertyName Seen -NotePropertyValue $now
+        $snapshot[$ProcessId] = $proc
+        if (-not $snapshot.ContainsKey($proc.ParentProcessId)) { $null = Get-LiveProcess $proc.ParentProcessId $snapshot }
+        $recent.Add($proc)
+
+        $signals = @(Get-ProcessSignals -Process $proc -Snapshot $snapshot)
+        # "File gone" at launch is often an installer mid-rename. Confirm it 3 s later first.
+        $gone = @($signals | Where-Object { $_.Rule -eq 'ImageGone' })
+        if ($gone.Count) {
+            $pendingImage.Add([pscustomobject]@{ Proc = $proc; Due = $now.AddSeconds(3); Signal = $gone[0] })
+            $signals = @($signals | Where-Object { $_.Rule -ne 'ImageGone' })
+        }
+        $points = [int](($signals | Measure-Object -Property Points -Sum).Sum)
+        if ($Quiet -and $points -lt 20) { return }
+        Write-SusEvent -Type 'PROC' -Text "$(Get-ProcessChain $proc $snapshot 4)  $(Limit-Text $proc.CommandLine 140)" -Signals $signals -LogPath $LogPath
+    }
+
+    $mode = if ($isAdmin) { 'kernel trace (+1 s list backstop)' } else { '100 ms process list (run as admin to also catch sub-100 ms processes)' }
+    Write-Host "SusHunt watch: processes via $mode, console windows every 100 ms, network every 1 s. Ctrl+C to stop." -ForegroundColor Cyan
+    if ($Quiet) { Write-Host 'Quiet mode: silence means nothing flagged and no console window appeared.' -ForegroundColor DarkGray }
     try {
         while ((Get-Date) -lt $stopAt) {
-            # 1. Process starts. Polled events can arrive out of order, so record the whole batch
-            #    first; otherwise a child printed before its parent shows the parent as exited.
-            $batch = @(foreach ($e in @(Get-Event -SourceIdentifier $source -ErrorAction SilentlyContinue)) {
-                Remove-Event -EventIdentifier $e.EventIdentifier
-                ConvertFrom-ProcessEvent $e.SourceEventArgs.NewEvent
-            })
-            foreach ($proc in $batch) { $snapshot[$proc.ProcessId] = $proc }
-            foreach ($proc in $batch | Sort-Object CreationDate) {
-                if ($proc.ProcessId -eq $PID) { continue }
-                if (-not $snapshot.ContainsKey($proc.ParentProcessId)) { $null = Get-LiveProcess $proc.ParentProcessId $snapshot }
-                $recent.Add($proc)
-                $signals = @(Get-ProcessSignals -Process $proc -Snapshot $snapshot)
-                $points = [int](($signals | Measure-Object -Property Points -Sum).Sum)
-                if ($Quiet -and $points -lt 20) { continue }
-                Write-SusEvent -Type 'PROC' -Text "$(Get-ProcessChain $proc $snapshot 4)  $(Limit-Text $proc.CommandLine 140)" -Signals $signals -LogPath $LogPath
+            $tick = [Diagnostics.Stopwatch]::StartNew()
+            if ($warmup.Pool -and -not (Receive-SignatureWarmup $warmup)) {
+                Write-Host "Signature check of $($warmup.Total) running programs finished in the background." -ForegroundColor DarkGray
+            }
+
+            # 1a. Kernel trace (admin): every process start, however brief.
+            if ($isAdmin) {
+                foreach ($e in @(Get-Event -SourceIdentifier $source -ErrorAction SilentlyContinue)) {
+                    Remove-Event -EventIdentifier $e.EventIdentifier
+                    $ev = $e.SourceEventArgs.NewEvent
+                    & $onNewProcess ([int]$ev.ProcessID) ([int]$ev.ParentProcessID) ([string]$ev.ProcessName)
+                }
+            }
+            # 1b. Process list diff (one system call; only new PIDs reach PowerShell). Every tick
+            #     without admin; once a second with admin, as a backstop for the trace.
+            if (-not $isAdmin -or (Get-Date) -ge $nextPoll) {
+                $nextPoll = (Get-Date).AddSeconds(1)
+                foreach ($info in [SusHunt.V3.Win32]::PollNewProcesses()) {
+                    & $onNewProcess $info.ProcessId $info.ParentProcessId $info.Name
+                }
             }
             $cutoff = (Get-Date).AddSeconds(-5)
             while ($recent.Count -and $recent[0].Seen -lt $cutoff) { $recent.RemoveAt(0) }
 
+            # 1c. Deferred "image gone" checks: report only if the file is still missing.
+            for ($i = $pendingImage.Count - 1; $i -ge 0; $i--) {
+                $item = $pendingImage[$i]
+                if ((Get-Date) -lt $item.Due) { continue }
+                $pendingImage.RemoveAt($i)
+                $sig = Get-FileSignature $item.Proc.ExecutablePath
+                if (-not $sig.Exists -and -not (Test-Path -LiteralPath $item.Proc.ExecutablePath)) {
+                    $s = New-Signal 'ImageGone' $item.Signal.Points $item.Signal.Attack $item.Signal.Why "$($item.Proc.ExecutablePath) (still missing after 3 s; $($sig.Reason))"
+                    Write-SusEvent -Type 'PROC' -Text "$(Get-ProcessChain $item.Proc $snapshot 4)  $(Limit-Text $item.Proc.CommandLine 140)" -Signals @($s) -LogPath $LogPath
+                }
+            }
+
             # 2. Console windows that just became visible
             $current = @{}
-            foreach ($w in [SusHunt.Native]::GetVisibleWindows($windowClasses)) {
+            foreach ($w in [SusHunt.V3.Win32]::GetVisibleWindows($windowClasses)) {
                 $current[$w.Handle] = $true
                 if ($knownWindows.ContainsKey($w.Handle)) { continue }
                 $owner = Get-LiveProcess $w.ProcessId $snapshot
@@ -134,15 +178,15 @@ function Watch-SusActivity {
             }
             $knownWindows = $current
 
-            # 3. New TCP connections to the internet, every 2 seconds
+            # 3. New TCP connections to the internet, every second (~3 ms via GetExtendedTcpTable)
             if ((Get-Date) -ge $nextNet) {
                 $now = Get-Date
-                $nextNet = $now.AddSeconds(2)
+                $nextNet = $now.AddSeconds(1)
                 $live = @{}
-                foreach ($c in @(Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
+                foreach ($c in [SusHunt.V3.Win32]::GetTcpConnections()) {
                     # Skip our own traffic: verifying signatures makes Windows fetch certificate
                     # revocation data (OCSP/CRL) over HTTP, which would flag ourselves.
-                    if ($c.OwningProcess -le 4 -or [int]$c.OwningProcess -eq $PID -or @('Listen', 'Bound', 'TimeWait') -contains [string]$c.State) { continue }
+                    if ($c.OwningProcess -le 4 -or $c.OwningProcess -eq $PID -or @('Listen', 'TimeWait', 'Closed', 'DeleteTCB') -contains $c.State) { continue }
                     $key = '{0}|{1}|{2}|{3}|{4}' -f $c.OwningProcess, $c.LocalAddress, $c.LocalPort, $c.RemoteAddress, $c.RemotePort
                     $live[$key] = $true
                     if ($netSeen.ContainsKey($key)) { continue }
@@ -151,7 +195,7 @@ function Watch-SusActivity {
 
                     $proc = $snapshot[[int]$c.OwningProcess]
                     if (-not $proc) { $proc = Get-LiveProcess $c.OwningProcess $snapshot }
-                    $name = if ($proc) { $proc.Name } else { "pid $($c.OwningProcess)" }
+                    $name = if ($proc -and $proc.Name) { $proc.Name } else { "pid $($c.OwningProcess)" }
                     $remote = Format-Endpoint $c.RemoteAddress $c.RemotePort
                     $signals = @()
                     if ($script:Lolbins -contains $name.ToLowerInvariant()) {
@@ -183,11 +227,17 @@ function Watch-SusActivity {
                 foreach ($k in @($netSeen.Keys)) { if (-not $live.ContainsKey($k)) { $netSeen.Remove($k) } }
                 $netPrimed = $true
             }
-            Start-Sleep -Milliseconds 100
+
+            # Sleep only for what is left of the 100 ms tick.
+            $rest = 100 - [int]$tick.ElapsedMilliseconds
+            if ($rest -gt 5) { Start-Sleep -Milliseconds $rest }
         }
     } finally {
-        Unregister-Event -SourceIdentifier $source -ErrorAction SilentlyContinue
-        Get-Event -SourceIdentifier $source -ErrorAction SilentlyContinue | Remove-Event
+        Stop-SignatureWarmup $warmup
+        if ($isAdmin) {
+            Unregister-Event -SourceIdentifier $source -ErrorAction SilentlyContinue
+            Get-Event -SourceIdentifier $source -ErrorAction SilentlyContinue | Remove-Event
+        }
         Write-Host 'SusHunt watch stopped.' -ForegroundColor Cyan
     }
 }

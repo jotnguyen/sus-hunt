@@ -186,10 +186,14 @@ polled), and `.\sus-hunt.ps1 sysmon -Hours 24` scores the last day of events.
 
 ## Limitations (read these)
 
-* **`watch` polls; `sysmon` does not.** Without admin, `watch` gets new processes from WMI
-  polling every 0.5 s, so something that lives for 100 ms can slip past. With admin,
-  `Win32_ProcessStartTrace` sees every start. The window catcher polls every 100 ms, and network
-  snapshots every 2 s miss short connections. Use `sysmon` mode when you can.
+* **`watch` polls; `sysmon` does not.** `watch` diffs the process list every 100 ms through
+  direct Win32 calls (Toolhelp, `QueryFullProcessImageName`, `GetExtendedTcpTable`), because a
+  single WMI query costs 200-800 ms and would stall the loop. A process that lives for less than
+  100 ms can still slip past unless you run as admin, which adds the kernel-backed
+  `Win32_ProcessStartTrace`. Network snapshots every second miss connections shorter than that.
+  Use `sysmon` mode when you can.
+* **"File gone" is confirmed before it is reported.** At launch, an installer can be renaming the
+  file, so `watch` rechecks 3 s later and reports only if it is still missing.
 * **Admin-only checks.** The hidden-task check reads Task Scheduler's registry index, which only
   Administrators can open. Without admin it is skipped quietly.
 * **User-mode view.** A rootkit can lie to every API this uses. Signed malware exists. So do

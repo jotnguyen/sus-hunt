@@ -1,6 +1,7 @@
 # Shared plumbing: scoring, paths, signatures, process trees and command-line parsing.
 
 $script:SigCache = @{}
+$script:MissingReason = @{}
 
 function New-Signal {
     param([string]$Rule, [int]$Points, [string]$Attack, [string]$Why, [string]$Evidence)
@@ -94,12 +95,16 @@ function Get-SignerName {
 $script:SignatureCheck = {
     param([string]$Path)
     $exists = $true
+    $reason = $null
     try { $null = [IO.File]::GetAttributes($Path) }
     catch {
         $inner = $_.Exception.InnerException
-        if ($inner -is [IO.FileNotFoundException] -or $inner -is [IO.DirectoryNotFoundException]) { $exists = $false }
+        if ($inner -is [IO.FileNotFoundException] -or $inner -is [IO.DirectoryNotFoundException]) {
+            $exists = $false
+            $reason = $inner.GetType().Name
+        }
     }
-    if (-not $exists) { return [pscustomobject]@{ Status = 'Missing'; Subject = $null; Exists = $false } }
+    if (-not $exists) { return [pscustomobject]@{ Status = 'Missing'; Subject = $null; Exists = $false; Reason = $reason } }
     try {
         $s = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
         $subject = if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { $null }
@@ -123,7 +128,11 @@ function Add-SignatureResult {
     param([string]$Path, $Raw)
     # Never cache "missing": the file may be mid-install, and a cached miss would repeat for
     # every later launch from that path.
-    if (-not $Raw.Exists) { $script:SigCache.Remove($Path); return }
+    if (-not $Raw.Exists) {
+        $script:SigCache.Remove($Path)
+        $script:MissingReason[$Path] = $Raw.Reason
+        return
+    }
     $signer = if ($Raw.Subject) { Get-SignerName $Raw.Subject } else { $null }
     $script:SigCache[$Path] = [pscustomobject]@{ Status = $Raw.Status; Signer = $signer; Exists = $true; Stamp = Get-FileStamp $Path }
 }
@@ -162,6 +171,50 @@ function Initialize-SignatureCache {
     }
 }
 
+function Start-SignatureWarmup {
+    # Background version of Initialize-SignatureCache: returns at once; call
+    # Receive-SignatureWarmup now and then to move finished results into the cache.
+    param([string[]]$Paths)
+    $todo = @($Paths | ForEach-Object { ConvertTo-NormalPath $_ } |
+        Where-Object { $_ -and -not (Test-SignatureCached $_) } | Sort-Object -Unique)
+    $pool = [runspacefactory]::CreateRunspacePool(1, [Math]::Max(1, [Math]::Min(4, [Environment]::ProcessorCount / 2)))
+    $pool.Open()
+    $jobs = New-Object System.Collections.Generic.List[object]
+    foreach ($p in $todo) {
+        $shell = [powershell]::Create().AddScript($script:SignatureCheck).AddArgument($p)
+        $shell.RunspacePool = $pool
+        $jobs.Add([pscustomobject]@{ Path = $p; Shell = $shell; Handle = $shell.BeginInvoke() })
+    }
+    [pscustomobject]@{ Pool = $pool; Jobs = $jobs; Total = $todo.Count }
+}
+
+function Receive-SignatureWarmup {
+    # Merges finished checks into the cache. Returns $true while work is still pending.
+    param($Warmup)
+    if (-not $Warmup -or -not $Warmup.Pool) { return $false }
+    for ($i = $Warmup.Jobs.Count - 1; $i -ge 0; $i--) {
+        $j = $Warmup.Jobs[$i]
+        if (-not $j.Handle.IsCompleted) { continue }
+        Add-SignatureResult $j.Path ($j.Shell.EndInvoke($j.Handle) | Select-Object -First 1)
+        $j.Shell.Dispose()
+        $Warmup.Jobs.RemoveAt($i)
+    }
+    if ($Warmup.Jobs.Count) { return $true }
+    $Warmup.Pool.Close()
+    $Warmup.Pool.Dispose()
+    $Warmup.Pool = $null
+    $false
+}
+
+function Stop-SignatureWarmup {
+    param($Warmup)
+    if (-not $Warmup -or -not $Warmup.Pool) { return }
+    foreach ($j in $Warmup.Jobs) { try { $j.Shell.Stop(); $j.Shell.Dispose() } catch { } }
+    $Warmup.Pool.Close()
+    $Warmup.Pool.Dispose()
+    $Warmup.Pool = $null
+}
+
 function Get-FileSignature {
     param([string]$Path)
     $p = ConvertTo-NormalPath $Path
@@ -169,7 +222,7 @@ function Get-FileSignature {
     if (-not (Test-SignatureCached $p)) { Initialize-SignatureCache @($p) }
     $hit = $script:SigCache[$p]
     if ($hit) { return $hit }
-    [pscustomobject]@{ Status = 'Missing'; Signer = $null; Exists = $false }
+    [pscustomobject]@{ Status = 'Missing'; Signer = $null; Exists = $false; Reason = $script:MissingReason[$p] }
 }
 
 function Test-MicrosoftSigned {

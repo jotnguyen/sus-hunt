@@ -5,6 +5,14 @@
 # file stays plain ASCII, which Windows PowerShell 5.1 needs to read it correctly.
 $script:BidiControls = '[{0}-{1}{2}-{3}]' -f [char]0x202A, [char]0x202E, [char]0x2066, [char]0x2069
 
+# Full expected folders for each Windows binary, worked out once instead of per process.
+$script:SystemBinaryDirs = @{}
+foreach ($name in $script:SystemBinaries.Keys) {
+    $script:SystemBinaryDirs[$name] = @(foreach ($d in $script:SystemBinaries[$name].Dirs) {
+        if ($d -eq '.') { $env:windir } else { [IO.Path]::Combine($env:windir, $d) }
+    })
+}
+
 function Get-ProcessSignals {
     param($Process, [hashtable]$Snapshot, [object[]]$Connections)
     $name = [string]$Process.Name
@@ -16,8 +24,8 @@ function Get-ProcessSignals {
     # Masquerading: right name, wrong folder.
     $known = $script:SystemBinaries[$lname]
     if ($known -and $path) {
-        $dir = (Split-Path $path -Parent).TrimEnd('\')
-        $expected = @(foreach ($d in $known.Dirs) { if ($d -eq '.') { $env:windir } else { Join-Path $env:windir $d } })
+        $dir = [IO.Path]::GetDirectoryName($path).TrimEnd('\')
+        $expected = $script:SystemBinaryDirs[$lname]
         if (-not ($expected | Where-Object { $_ -eq $dir })) {
             New-Signal 'WrongFolder' 60 'T1036.005' "The real $lname only lives in $($expected -join ' or ')." $path
         }
