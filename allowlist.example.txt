@@ -1,0 +1,6 @@
+# Copy this file to allowlist.txt (git-ignored) and add wildcard patterns, one per line.
+# A finding is hidden when its Path or Name matches a pattern (PowerShell -like).
+# Keep it short: every line is a place you have decided not to look.
+#
+# C:\Program Files\Git\usr\bin\*
+# *\AppData\Local\Programs\SomeUnsignedTool\*
