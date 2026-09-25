@@ -120,7 +120,7 @@ function Get-FileStamp {
     try {
         $fi = New-Object IO.FileInfo $Path
         if ($fi.Exists) { return '{0}|{1}' -f $fi.Length, $fi.LastWriteTimeUtc.Ticks }
-    } catch { }
+    } catch { Write-Verbose "cannot stat ${Path}: $($_.Exception.Message)" }
     $null
 }
 
@@ -209,7 +209,7 @@ function Receive-SignatureWarmup {
 function Stop-SignatureWarmup {
     param($Warmup)
     if (-not $Warmup -or -not $Warmup.Pool) { return }
-    foreach ($j in $Warmup.Jobs) { try { $j.Shell.Stop(); $j.Shell.Dispose() } catch { } }
+    foreach ($j in $Warmup.Jobs) { try { $j.Shell.Stop(); $j.Shell.Dispose() } catch { Write-Verbose "runspace already gone: $($_.Exception.Message)" } }
     $Warmup.Pool.Close()
     $Warmup.Pool.Dispose()
     $Warmup.Pool = $null

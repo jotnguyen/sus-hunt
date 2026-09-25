@@ -26,41 +26,41 @@ function ConvertFrom-SysmonEventXml {
 
 function Get-SysmonEventSignals {
     # Applies the same rules as the rest of the kit to one parsed Sysmon event.
-    param($Event, [hashtable]$BeaconTimes, [hashtable]$BeaconAlerted)
-    switch ($Event.Id) {
+    param($Record, [hashtable]$BeaconTimes, [hashtable]$BeaconAlerted)
+    switch ($Record.Id) {
         1 {
             $proc = [pscustomobject]@{
-                Name = Split-Path $Event.Image -Leaf; ProcessId = [int]$Event.ProcessId; ParentProcessId = [int]$Event.ParentProcessId
-                CommandLine = $Event.CommandLine; ExecutablePath = $Event.Image; CreationDate = $Event.Time
+                Name = Split-Path $Record.Image -Leaf; ProcessId = [int]$Record.ProcessId; ParentProcessId = [int]$Record.ParentProcessId
+                CommandLine = $Record.CommandLine; ExecutablePath = $Record.Image; CreationDate = $Record.Time
             }
             $parent = [pscustomobject]@{
-                Name = if ($Event.ParentImage) { Split-Path $Event.ParentImage -Leaf } else { $null }
-                ProcessId = [int]$Event.ParentProcessId; ParentProcessId = 0; CreationDate = [datetime]::MinValue
+                Name = if ($Record.ParentImage) { Split-Path $Record.ParentImage -Leaf } else { $null }
+                ProcessId = [int]$Record.ParentProcessId; ParentProcessId = 0; CreationDate = [datetime]::MinValue
             }
-            $snapshot = @{ ([int]$Event.ParentProcessId) = $parent }
-            $text = "$($proc.Name)[$($proc.ProcessId)] <- $($parent.Name)[$($parent.ProcessId)]  $(Limit-Text $Event.CommandLine 140)"
+            $snapshot = @{ ([int]$Record.ParentProcessId) = $parent }
+            $text = "$($proc.Name)[$($proc.ProcessId)] <- $($parent.Name)[$($parent.ProcessId)]  $(Limit-Text $Record.CommandLine 140)"
             return [pscustomobject]@{ Type = 'PROC'; Text = $text; Signals = @(Get-ProcessSignals -Process $proc -Snapshot $snapshot) }
         }
         3 {
-            if ((Get-IpScope $Event.DestinationIp) -ne 'Public') { return }
-            $name = Split-Path $Event.Image -Leaf
-            $remote = Format-Endpoint $Event.DestinationIp $Event.DestinationPort
+            if ((Get-IpScope $Record.DestinationIp) -ne 'Public') { return }
+            $name = Split-Path $Record.Image -Leaf
+            $remote = Format-Endpoint $Record.DestinationIp $Record.DestinationPort
             $signals = @()
             if ($script:Lolbins -contains $name.ToLowerInvariant()) {
                 $signals += New-Signal 'LolbinOnInternet' 35 'T1105' 'Built-in Windows tool connecting out.' $remote
             }
-            if ($script:NotablePorts.ContainsKey([int]$Event.DestinationPort)) {
-                $signals += New-Signal 'NotablePort' 20 'T1571' $script:NotablePorts[[int]$Event.DestinationPort] $remote
+            if ($script:NotablePorts.ContainsKey([int]$Record.DestinationPort)) {
+                $signals += New-Signal 'NotablePort' 20 'T1571' $script:NotablePorts[[int]$Record.DestinationPort] $remote
             }
-            $host_ = if ($Event.DestinationHostname) { " ($($Event.DestinationHostname))" } else { '' }
-            return [pscustomobject]@{ Type = 'NET'; Text = "$name[$($Event.ProcessId)] -> $remote$host_"; Signals = $signals }
+            $host_ = if ($Record.DestinationHostname) { " ($($Record.DestinationHostname))" } else { '' }
+            return [pscustomobject]@{ Type = 'NET'; Text = "$name[$($Record.ProcessId)] -> $remote$host_"; Signals = $signals }
         }
         22 {
             # Beacon tracking by (program, domain): CDNs rotate IPs, domains stay put.
-            $name = Split-Path $Event.Image -Leaf
-            $key = "$name -> $($Event.QueryName)"
+            $name = Split-Path $Record.Image -Leaf
+            $key = "$name -> $($Record.QueryName)"
             if (-not $BeaconTimes.ContainsKey($key)) { $BeaconTimes[$key] = New-Object System.Collections.Generic.List[double] }
-            $BeaconTimes[$key].Add(($Event.Time - [datetime]'2000-01-01').TotalSeconds)
+            $BeaconTimes[$key].Add(($Record.Time - [datetime]'2000-01-01').TotalSeconds)
             $beacon = Test-Beacon $BeaconTimes[$key].ToArray()
             if ($beacon -and -not $BeaconAlerted.ContainsKey($key)) {
                 $BeaconAlerted[$key] = $true
@@ -134,6 +134,8 @@ function Watch-SusSysmon {
     param([int]$Seconds = 0, [string]$LogPath, [switch]$Quiet)
     if (-not (Test-SysmonInstalled)) { throw 'Sysmon is not installed (no Microsoft-Windows-Sysmon/Operational log). See README.' }
     $beaconTimes = @{}; $beaconAlerted = @{}
+    # The callback runs later, inside Watch-SusEventLog; copy the parameters it needs into locals.
+    $quietOnly = [bool]$Quiet; $logFile = $LogPath
     Write-Host 'SusHunt sysmon: reading events as Sysmon writes them. Ctrl+C to stop.' -ForegroundColor Cyan
     $xpath = '*[System[(EventID=1 or EventID=3 or EventID=22)]]'
     Watch-SusEventLog -LogName $script:SysmonLog -XPath $xpath -Seconds $Seconds -OnRecord {
@@ -142,8 +144,8 @@ function Watch-SusSysmon {
         if (-not $r) { return }
         $points = [int](($r.Signals | Measure-Object -Property Points -Sum).Sum)
         if ($r.Type -eq 'DNS' -and $points -eq 0) { return }
-        if ($Quiet -and $points -lt 20) { return }
-        Write-SusEvent -Type $r.Type -Text $r.Text -Signals $r.Signals -LogPath $LogPath
+        if ($quietOnly -and $points -lt 20) { return }
+        Write-SusEvent -Type $r.Type -Text $r.Text -Signals $r.Signals -LogPath $logFile
     }
     Write-Host 'SusHunt sysmon stopped.' -ForegroundColor Cyan
 }
