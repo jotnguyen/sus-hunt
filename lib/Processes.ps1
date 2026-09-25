@@ -1,10 +1,6 @@
 # Process checks. For each running program: is it where it should be, started by whom it
 # should be, signed, and is its command line or network use out of character?
 
-# Unicode bidirectional controls (U+202A-U+202E, U+2066-U+2069). Built from code points so this
-# file stays plain ASCII, which Windows PowerShell 5.1 needs to read it correctly.
-$script:BidiControls = '[{0}-{1}{2}-{3}]' -f [char]0x202A, [char]0x202E, [char]0x2066, [char]0x2069
-
 # Full expected folders for each Windows binary, worked out once instead of per process.
 $script:SystemBinaryDirs = @{}
 foreach ($name in $script:SystemBinaries.Keys) {
@@ -36,16 +32,7 @@ function Get-ProcessSignals {
         New-Signal 'UnexpectedParent' 40 'T1036' "$lname is normally started by $($known.Parents -join ' or ')." "parent: $($parent.Name) [$($parent.ProcessId)]"
     }
 
-    $twin = Get-LookalikeName $name
-    if ($twin) {
-        New-Signal 'LookalikeName' 45 'T1036.005' "One letter away from the Windows program $twin. A cheap and common disguise." $name
-    }
-    if ($name -match '(?i)\.(pdf|docx?|xlsx?|pptx?|jpe?g|png|txt|zip|rar)\.(exe|scr|com|pif|bat|cmd)$') {
-        New-Signal 'DoubleExtension' 40 'T1036.007' 'Explorer hides known extensions, so invoice.pdf.exe shows up as invoice.pdf.' $name
-    }
-    if ($name -match $script:BidiControls) {
-        New-Signal 'BidiTrick' 50 'T1036.002' 'Contains a Unicode right-to-left control character, used to make the extension read backwards.' $name
-    }
+    Get-FileNameSignals $name
 
     if ($path) {
         $risk = Get-PathRisk $path

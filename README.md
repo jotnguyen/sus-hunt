@@ -22,6 +22,7 @@ cd sus-hunt
 .\sus-hunt.ps1 sysmon -Quiet       # live (event-driven) from Sysmon's log; -Hours 24 to look back
 .\sus-hunt.ps1 conns               # who is talking to whom, signed or not
 .\sus-hunt.ps1 autoruns            # every autostart entry, scored or not
+.\sus-hunt.ps1 files -Html -Open   # recent programs/scripts/shortcuts in Temp, AppData, Downloads...
 ```
 
 A good routine: take a `baseline` on a day you trust the machine, then run `diff` weekly or
@@ -74,6 +75,15 @@ Get-NetFirewallRule -Group SusHunt | Remove-NetFirewallRule            # undo
 | Autoruns | Winlogon Shell/Userinit, AppInit_DLLs | 60 / 50 | T1547.004 / T1546.010 | logon hijacks, DLLs injected everywhere |
 | Autoruns | WMI subscriptions | 50 | T1546.003 | fileless persistence: code that runs on a WMI event |
 | Live | Beacon | 40 | T1071 | same program, same destination, on a steady timer |
+| File | DownloadedExecutable / DiskImage | 15 / +10 | T1204.002 / T1553.005 | Mark-of-the-Web says it came from the internet, and from which URL; `.iso` payloads lose that mark once mounted |
+| File | ExtensionMismatch | 40 | T1036.008 | `notes.txt` that starts with `MZ` is a program |
+| File | DoubleExtension / BidiTrick / LookalikeName | 40 / 50 / 45 | T1036.007 / .002 / .005 | the same name checks as for processes, before the file ever runs |
+| File | UnsignedInHighRisk | 20 | T1204.002 | unsigned program in Temp, Downloads or Public |
+| File | PackedSection | 15 | T1027.002 | an unsigned program whose code section is near-random (Shannon entropy > 7.2) |
+| File | OddCompileTime | 5 | T1070.006 | unsigned PE compiled "in the future" or before 2000 |
+| File | HiddenInUserDir | 10 | T1564.001 | hidden program or script in a user folder |
+| File | LnkRunsShell | 35 | T1204.002 | a shortcut that starts PowerShell or a LOLBin; its arguments get the command-line rules too |
+| File | YaraMatch | 50 | from the rule | your YARA rules matched (optional, needs `yara64.exe`) |
 
 Points add up per item and cap at 100. Low starts at 15, Medium at 30, High at 60. The numbers
 are judgement calls: tune them in [`lib/Rules.ps1`](lib/Rules.ps1), which is plain data.
@@ -110,6 +120,36 @@ To find the culprit, run `.\sus-hunt.ps1 watch` and wait for it to happen:
 
 The owner chain is the answer. (For a classic console window, `GetWindowThreadProcessId`
 reports the program running *inside* the console, not `conhost.exe`.)
+
+## Files on disk
+
+```powershell
+.\sus-hunt.ps1 files                      # last 7 days, Low (15) and up
+.\sus-hunt.ps1 files -Days 1 -Html -Open  # just today, as an HTML report
+.\sus-hunt.ps1 files -Path D:\Shared      # add folders to the default list
+.\sus-hunt.ps1 files -Yara .\my-rules     # also run your YARA rules (yara64.exe on PATH, or -YaraExe)
+```
+
+Malware without admin rights has to live somewhere a normal user can write: Temp, AppData,
+Downloads, ProgramData, Public, and a few folders inside Windows. `files` looks at programs,
+scripts, shortcuts, installers and disk images created or changed there in the last `-Days` days,
+plus any file whose first two bytes are `MZ` (the start of every Windows program) under a document,
+picture or `.tmp`-style name. For each one it reads:
+
+* **Mark-of-the-Web.** Browsers write a `Zone.Identifier` stream next to a download, with the
+  URL it came from. See it yourself: `Get-Content .\file.exe -Stream Zone.Identifier`.
+* **The PE header.** Machine type, compile time and the section table, parsed by hand in
+  `Get-PeInfo`. Packed code shows up as a section with entropy near 8 bits per byte.
+* **The signature** (Authenticode), and the SHA-256 of every file that scores, so you can look it
+  up by hand. Nothing is uploaded.
+* **Shortcuts.** The target and arguments of each `.lnk`, read with `WScript.Shell` without
+  running it.
+
+It never runs what it finds. Browser caches and site storage are skipped (tens of thousands of
+data files, and a browser does not run programs from them); the list is `$script:FileScanSkipDirs`
+in `lib/Rules.ps1`. OneDrive "online-only" files are skipped too, because reading one downloads it.
+A 7-day scan takes about a minute on a busy machine; the first run is the slowest because
+antivirus scans each file the first time it is opened.
 
 ## Baseline and diff
 
@@ -200,6 +240,9 @@ polled), and `.\sus-hunt.ps1 sysmon -Hours 24` scores the last day of events.
   legitimate tools that trip every rule: installers run from Temp, dev tools are unsigned, and
   some well-known apps launch PowerShell with `-EncodedCommand`. Treat a score as a reason to
   look, not a verdict.
+* **`files` trades coverage for speed.** It skips browser cache folders and `node_modules`, and
+  only checks the signature of programs over 32 MB when they sit in Temp, Downloads or Public.
+  A payload parked in one of those places is missed.
 * **Coverage.** It skips DLL search-order hijacking, COM hijacking, browser extensions, drivers,
   and memory injection. Those are good next rules to write; the plan is in
   [`docs/backlog/`](docs/backlog/README.md).
@@ -218,18 +261,24 @@ place you have decided not to look.
 ## Tests
 
 ```powershell
-Invoke-Pester .\tests      # Pester 3.4 ships with Windows; Pester 4 also works
+Invoke-Pester .\tests                          # Pester 3.4 ships with Windows; Pester 4 also works
+powershell -NoProfile -File tools\lint.ps1     # PSScriptAnalyzer with the repo settings
 ```
+
+The linter needs `Install-Module PSScriptAnalyzer -Scope CurrentUser` once (a developer tool; the
+kit itself still needs no installs). CI (`.github/workflows/check.yml`) runs the linter, the tests
+and the hygiene gate on every pull request, on Windows PowerShell 5.1.
 
 The tests cover the logic that does not depend on your machine's state: CIDR matching, scopes,
 byte order, edit distance, command-line rules (including decoding `-EncodedCommand`), path
 parsing and program search order, the signature cache, PID-reuse checks, HTML encoding, Sysmon
-event parsing and beacon math.
+event parsing, beacon math, and for `files`: entropy, the PE parser, Mark-of-the-Web, extension
+checks, file scoring and the folder walk.
 
 ## Layout
 
 ```
-sus-hunt.ps1          front door: triage | watch | conns | autoruns
+sus-hunt.ps1          front door: triage | watch | sysmon | conns | autoruns | baseline | diff | files
 SusHunt.psm1          module; loads lib\
 lib\Rules.ps1         detection rules as data
 lib\Common.ps1        paths, signatures, process tree, command-line parsing, scoring
@@ -240,10 +289,13 @@ lib\Watch.ps1         live watcher (polling)
 lib\Sysmon.ps1        Sysmon event parsing, live (event-driven) and look-back modes
 lib\Baseline.ps1      baseline and diff, parallel SHA-256
 lib\Report.ps1        HTML reports (all values encoded)
-lib\Native.ps1        the two Win32 calls PowerShell lacks (window enumeration, SetTcpEntry)
+lib\Files.ps1         files command: folder walk, PE parser, entropy, Mark-of-the-Web, .lnk, YARA
+lib\Native.ps1        C# for what PowerShell lacks or does slowly (windows, processes, TCP, file walk, entropy)
 tests\                Pester tests
 tools\hygiene-gate.ps1 pre-commit check: no machine or personal details in tracked files
-docsacklog\         roadmap: one ticket per planned feature
+tools\lint.ps1        PSScriptAnalyzer with PSScriptAnalyzerSettings.psd1 (5.1-compatible syntax)
+.github\workflows\    CI: lint, tests, hygiene gate
+docs\backlog\       roadmap: one ticket per planned feature
 CLAUDE.md, AGENTS.md  notes for AI coding agents working on this repo (.ai\, .claude\skills\)
 ```
 

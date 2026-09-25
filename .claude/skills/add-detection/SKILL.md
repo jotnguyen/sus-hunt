@@ -32,6 +32,7 @@ description: Add or change a detection rule or a new scan source in sus-hunt the
 
    ```powershell
    Invoke-Pester .\tests
+   powershell -NoProfile -File tools\lint.ps1          # must print lint-ok
    git add -A; powershell -NoProfile -File tools\hygiene-gate.ps1
    ```
 

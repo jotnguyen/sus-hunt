@@ -152,3 +152,73 @@ $script:CommandLineRules = @(
         Why = 'Adds a Run key entry, the oldest way to start at every logon.'
     }
 )
+
+# ---- files command (lib/Files.ps1) -------------------------------------------------------------
+
+# File types worth a look when they turn up in a folder any user can write to: programs, scripts,
+# shortcuts, installers and disk images. Any other file that starts with 'MZ' is looked at too.
+$script:ScanExtensions = @(
+    '.exe', '.dll', '.scr', '.cpl', '.sys', '.ocx', '.com', '.ps1', '.psm1', '.bat', '.cmd', '.vbs',
+    '.vbe', '.js', '.jse', '.wsf', '.hta', '.lnk', '.msi', '.iso', '.img', '.vhd', '.vhdx'
+)
+$script:PeExtensions = @('.exe', '.dll', '.scr', '.cpl', '.sys', '.ocx', '.com')
+$script:ScriptExtensions = @('.ps1', '.psm1', '.bat', '.cmd', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.hta')
+$script:DiskImageExtensions = @('.iso', '.img', '.vhd', '.vhdx')
+
+# Extensions that say "document, picture or media" to a person. A program (MZ header) wearing one
+# of these is in disguise. Other non-program extensions (.tmp, .dat, .bin) hold real PE files all
+# the time (installers, caches), so they are not on this list.
+$script:DecoyExtensions = @(
+    '.txt', '.log', '.csv', '.pdf', '.rtf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt',
+    '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.ico', '.svg', '.webp', '.mp3', '.mp4', '.wav', '.avi',
+    '.mkv', '.mov', '.zip', '.rar', '.7z', '.html', '.htm', '.xml', '.json'
+)
+
+# Files with these extensions (or none) get their first bytes read to look for an 'MZ' header.
+# Opening a file costs several ms once antivirus has looked at it, so not every file is opened.
+$script:SniffExtensions = @('', '.tmp', '.dat', '.bin') + $script:DecoyExtensions
+
+# Only sniff the first bytes of files up to this size.
+$script:FileSniffMaxBytes = 50MB
+
+# Programs bigger than this are only signature-checked in Temp, Downloads and Public. Checking a
+# signature hashes the whole file, and big recent binaries are nearly always app updates.
+$script:FileSignatureMaxBytes = 32MB
+
+# A section above this many bits per byte (8 is the maximum) is packed or encrypted. Compiled
+# code usually sits around 6.
+$script:PackedEntropy = 7.2
+
+# Signals for files on disk. Evidence is filled in by lib/Files.ps1.
+$script:FileRules = @{
+    DownloadedExecutable = @{ Points = 15; Attack = 'T1204.002'
+        Why = 'Came from the internet (Mark-of-the-Web zone 3 or 4). Every installer you download has this; check that you meant to download it.' }
+    ExtensionMismatch = @{ Points = 40; Attack = 'T1036.008'
+        Why = 'The file is a Windows program (starts with MZ) but its extension says document or picture. Real files do not do that.' }
+    UnsignedInHighRisk = @{ Points = 20; Attack = 'T1204.002'
+        Why = 'Unsigned program in Temp, Downloads or Public. Installers unpack unsigned helpers here; so do droppers.' }
+    PackedSection = @{ Points = 15; Attack = 'T1027.002'
+        Why = 'An executable section is close to random (high entropy): packed or encrypted code. Packers are also used for honest reasons, so this only counts on unsigned files.' }
+    OddCompileTime = @{ Points = 5; Attack = 'T1070.006'
+        Why = 'The PE compile time is in the future or before 2000. Timestomped, or a reproducible build that stores a hash in that field (all of Windows does), so it only counts on files that are not validly signed.' }
+    HiddenInUserDir = @{ Points = 10; Attack = 'T1564.001'
+        Why = 'A program or script with the Hidden or System attribute in a user folder. Explorer hides it by default.' }
+    LnkRunsShell = @{ Points = 35; Attack = 'T1204.002'
+        Why = 'A shortcut that starts a shell or LOLBin. Phishing uses .lnk files to run PowerShell when someone double-clicks a "document".' }
+    DiskImage = @{ Points = 10; Attack = 'T1553.005'
+        Why = 'A downloaded disk image. Files inside a mounted .iso lose Mark-of-the-Web, which is why phishing ships payloads in them.' }
+    YaraMatch = @{ Points = 50; Attack = ''
+        Why = 'A YARA rule you supplied matched this file. Read the rule to see what it looks for.' }
+}
+
+# Folders the file scan does not walk into: browser caches and site storage. They hold tens of
+# thousands of small data files, which makes the walk take minutes, and a browser does not run
+# anything from them. The trade-off is deliberate: a payload hidden in a cache folder is missed.
+# Add to this list if a scan is slow on your machine (-Verbose prints the roots).
+$script:FileScanSkipDirs = @(
+    '(?i)\\Mozilla\\Firefox\\Profiles\\[^\\]+\\(storage|cache2|datareporting|saved-telemetry-pings)$'
+    '(?i)\\(Cache|Code Cache|GPUCache|DawnCache|DawnGraphiteCache|DawnWebGPUCache|GrShaderCache|ShaderCache|IndexedDB|Service Worker|CacheStorage|File System|blob_storage|Session Storage|Local Storage)$'
+    '(?i)\\Microsoft\\Windows\\(INetCache|WebCache|Explorer\\ThumbCacheToDelete)$'
+    '(?i)\\Packages\\[^\\]+\\(AC|TempState|LocalCache)$'
+    '(?i)\\node_modules$'
+)

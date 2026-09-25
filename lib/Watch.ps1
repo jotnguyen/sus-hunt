@@ -19,8 +19,8 @@ function Get-LiveProcess {
 function Get-NativeSnapshot {
     # Same shape as Get-ProcessSnapshot, from Toolhelp + limited queries (~1 ms per process).
     $map = @{}
-    foreach ($info in [SusHunt.V3.Win32]::ListProcesses()) {
-        [SusHunt.V3.Win32]::DescribeProcess($info)
+    foreach ($info in [SusHunt.V4.Win32]::ListProcesses()) {
+        [SusHunt.V4.Win32]::DescribeProcess($info)
         $map[[int]$info.ProcessId] = ConvertFrom-NativeProcess $info
     }
     $map
@@ -74,8 +74,8 @@ function Watch-SusActivity {
         Register-CimIndicationEvent -ClassName Win32_ProcessStartTrace -SourceIdentifier $source
     }
 
-    [SusHunt.V3.Win32]::ResetProcessPolling()
-    $null = [SusHunt.V3.Win32]::PollNewProcesses()   # primes the list; returns nothing the first time
+    [SusHunt.V4.Win32]::ResetProcessPolling()
+    $null = [SusHunt.V4.Win32]::PollNewProcesses()   # primes the list; returns nothing the first time
     $nextPoll = Get-Date
     $snapshot = Get-NativeSnapshot
     # Seen PIDs and their image names; a known PID with a new name means the PID was reused.
@@ -87,7 +87,7 @@ function Watch-SusActivity {
 
     $windowClasses = [string[]]@('ConsoleWindowClass', 'CASCADIA_HOSTING_WINDOW_CLASS')
     $knownWindows = @{}
-    foreach ($w in [SusHunt.V3.Win32]::GetVisibleWindows($windowClasses)) { $knownWindows[$w.Handle] = $true }
+    foreach ($w in [SusHunt.V4.Win32]::GetVisibleWindows($windowClasses)) { $knownWindows[$w.Handle] = $true }
     $recent = New-Object System.Collections.Generic.List[object]
     $pendingImage = New-Object System.Collections.Generic.List[object]
     $netSeen = @{}
@@ -145,7 +145,7 @@ function Watch-SusActivity {
             #     without admin; once a second with admin, as a backstop for the trace.
             if (-not $isAdmin -or (Get-Date) -ge $nextPoll) {
                 $nextPoll = (Get-Date).AddSeconds(1)
-                foreach ($info in [SusHunt.V3.Win32]::PollNewProcesses()) {
+                foreach ($info in [SusHunt.V4.Win32]::PollNewProcesses()) {
                     & $onNewProcess $info.ProcessId $info.ParentProcessId $info.Name
                 }
             }
@@ -166,7 +166,7 @@ function Watch-SusActivity {
 
             # 2. Console windows that just became visible
             $current = @{}
-            foreach ($w in [SusHunt.V3.Win32]::GetVisibleWindows($windowClasses)) {
+            foreach ($w in [SusHunt.V4.Win32]::GetVisibleWindows($windowClasses)) {
                 $current[$w.Handle] = $true
                 if ($knownWindows.ContainsKey($w.Handle)) { continue }
                 $owner = Get-LiveProcess $w.ProcessId $snapshot
@@ -183,7 +183,7 @@ function Watch-SusActivity {
                 $now = Get-Date
                 $nextNet = $now.AddSeconds(1)
                 $live = @{}
-                foreach ($c in [SusHunt.V3.Win32]::GetTcpConnections()) {
+                foreach ($c in [SusHunt.V4.Win32]::GetTcpConnections()) {
                     # Skip our own traffic: verifying signatures makes Windows fetch certificate
                     # revocation data (OCSP/CRL) over HTTP, which would flag ourselves.
                     if ($c.OwningProcess -le 4 -or $c.OwningProcess -eq $PID -or @('Listen', 'TimeWait', 'Closed', 'DeleteTCB') -contains $c.State) { continue }

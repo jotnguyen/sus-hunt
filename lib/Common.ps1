@@ -387,6 +387,26 @@ function Get-LookalikeName {
     $match
 }
 
+# Unicode bidirectional controls (U+202A-U+202E, U+2066-U+2069). Built from code points so this
+# file stays plain ASCII, which Windows PowerShell 5.1 needs to read it correctly.
+$script:BidiControls = '[{0}-{1}{2}-{3}]' -f [char]0x202A, [char]0x202E, [char]0x2066, [char]0x2069
+
+function Get-FileNameSignals {
+    # Name tricks that work the same on a running process and on a file waiting on disk.
+    param([string]$Name)
+    if (-not $Name) { return }
+    $twin = Get-LookalikeName $Name
+    if ($twin) {
+        New-Signal 'LookalikeName' 45 'T1036.005' "One letter away from the Windows program $twin. A cheap and common disguise." $Name
+    }
+    if ($Name -match '(?i)\.(pdf|docx?|xlsx?|pptx?|jpe?g|png|txt|zip|rar)\.(exe|scr|com|pif|bat|cmd|lnk|js|vbs|hta)$') {
+        New-Signal 'DoubleExtension' 40 'T1036.007' 'Explorer hides known extensions, so invoice.pdf.exe shows up as invoice.pdf.' $Name
+    }
+    if ($Name -match $script:BidiControls) {
+        New-Signal 'BidiTrick' 50 'T1036.002' 'Contains a Unicode right-to-left control character, used to make the extension read backwards.' $Name
+    }
+}
+
 function ConvertFrom-EncodedCommand {
     # -EncodedCommand is base64 over UTF-16LE text.
     param([string]$CommandLine)
