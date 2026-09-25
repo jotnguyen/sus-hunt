@@ -146,6 +146,104 @@ function Test-WindowsDarkMode {
     [bool]($v -and $v.AppsUseLightTheme -eq 0)
 }
 
+# Scan runner: the bookkeeping behind Run, Cancel and the status line, kept free of WPF so the
+# tests can drive it with a real runspace. The window calls Update-SusScan from a timer on the UI
+# thread; nothing here touches a control.
+
+function New-SusScanRunner {
+    # Holds the running scan (at most one) and cancelled scans still winding down.
+    @{ Job = $null; Stopping = (New-Object System.Collections.Generic.List[object]) }
+}
+
+function Start-SusScan {
+    # Starts Script in its own runspace. Returns $false if a scan is already running.
+    param([Parameter(Mandatory)][hashtable]$Runner, [Parameter(Mandatory)][string]$Scan,
+          [Parameter(Mandatory)][string]$Script, [object[]]$ArgumentList)
+    if ($Runner.Job) { return $false }
+    $rs = [runspacefactory]::CreateRunspace()
+    $rs.Open()
+    $ps = [powershell]::Create()
+    $ps.Runspace = $rs
+    $null = $ps.AddScript($Script)
+    foreach ($a in $ArgumentList) { $null = $ps.AddArgument($a) }
+    $output = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $noInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
+    $noInput.Complete()
+    $Runner.Job = @{ Scan = $Scan; PS = $ps; Runspace = $rs; Output = $output; Taken = 0
+                     Clock = [Diagnostics.Stopwatch]::StartNew(); Handle = $ps.BeginInvoke($noInput, $output) }
+    $true
+}
+
+function Close-SusScanJob {
+    # Ends a finished job and frees its runspace. Returns the exception that ended it, if any.
+    param([Parameter(Mandatory)][hashtable]$Job)
+    $failed = $null
+    try { $null = $Job.PS.EndInvoke($Job.Handle) }
+    catch { $failed = $_.Exception.InnerException; if (-not $failed) { $failed = $_.Exception } }
+    $Job.PS.Dispose(); $Job.Runspace.Dispose()
+    $failed
+}
+
+function Update-SusScan {
+    # One timer tick: frees cancelled scans that have stopped, collects new output, and reports
+    # the state. State is Idle, Running, Finished or Failed; Busy says whether to keep polling.
+    param([Parameter(Mandatory)][hashtable]$Runner)
+    # Not @($Runner.Stopping): 5.1 throws "Argument types do not match" on a List held in a hashtable.
+    foreach ($old in $Runner.Stopping.ToArray()) {
+        if ($old.Handle.IsCompleted) {
+            $null = Close-SusScanJob $old
+            $null = $Runner.Stopping.Remove($old)
+        }
+    }
+    $job = $Runner.Job
+    $r = [pscustomobject]@{ State = 'Idle'; Scan = $null; Items = @(); Elapsed = [TimeSpan]::Zero; Progress = $null
+                            Message = $null; Busy = [bool]$Runner.Stopping.Count }
+    if (-not $job) { return $r }
+    $r.Scan = $job.Scan
+    $r.Busy = $true
+    $done = $job.Handle.IsCompleted   # read before draining, so no late output is missed
+    $items = New-Object System.Collections.Generic.List[object]
+    while ($job.Taken -lt $job.Output.Count) {
+        $items.Add($job.Output[$job.Taken])
+        $job.Taken++
+    }
+    $r.Items = $items.ToArray()
+    $r.Elapsed = $job.Clock.Elapsed
+    if (-not $done) {
+        $p = $job.PS.Streams.Progress
+        $r.State = 'Running'
+        $r.Progress = if ($p.Count) { $p[$p.Count - 1].StatusDescription } else { 'working' }
+        return $r
+    }
+    $errors = @($job.PS.Streams.Error)
+    $failed = Close-SusScanJob $job
+    $Runner.Job = $null
+    $r.Busy = [bool]$Runner.Stopping.Count
+    if ($failed) { $r.State = 'Failed'; $r.Message = $failed.Message }
+    else {
+        $r.State = 'Finished'
+        if ($errors.Count) { $r.Message = [string]$errors[0] }
+    }
+    $r
+}
+
+function Stop-SusScan {
+    # Cancel. Stop() only takes effect between pipeline steps, and a C# folder walk can take many
+    # seconds to reach one, so the scan is detached at once and Update-SusScan frees it later.
+    # Returns the detached job (for its name and clock), or $null if nothing was running.
+    param([Parameter(Mandatory)][hashtable]$Runner, [switch]$All)
+    $job = $Runner.Job
+    if ($job) {
+        $null = $job.PS.BeginStop($null, $null)
+        $Runner.Job = $null
+        $Runner.Stopping.Add($job)
+    }
+    if ($All) {
+        foreach ($old in $Runner.Stopping.ToArray()) { $null = $old.PS.BeginStop($null, $null) }
+    }
+    $job
+}
+
 function Show-SusGui {
     <#
     .SYNOPSIS
@@ -189,8 +287,8 @@ function Show-SusGui {
 
     # Mutable state lives in one hashtable: event handlers run in child scopes, so assigning a
     # plain variable there would only create a local copy.
-    $state = @{ Scan = 'Triage'; LastScan = $null; Results = (New-Object System.Collections.Generic.List[object]); Job = $null
-                Stopping = (New-Object System.Collections.Generic.List[object])
+    $state = @{ Scan = 'Triage'; LastScan = $null; Results = (New-Object System.Collections.Generic.List[object])
+                Runner = (New-SusScanRunner)
                 FilterText = ''; Severities = @() }
     $rows = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
     $ui.Grid.ItemsSource = $rows
@@ -331,48 +429,25 @@ function Show-SusGui {
     $timer = New-Object Windows.Threading.DispatcherTimer
     $timer.Interval = [TimeSpan]::FromMilliseconds(250)
     $timer.add_Tick({
-        # Cancelled scans are detached at once and disposed here when their runspace has stopped.
-        foreach ($old in $state.Stopping.ToArray()) {   # not @(): 5.1 throws "Argument types do not match" on this List
-            if ($old.Handle.IsCompleted) {
-                try { $null = $old.PS.EndInvoke($old.Handle) } catch { Write-Verbose "cancelled scan ended: $_" }
-                $old.PS.Dispose(); $old.Runspace.Dispose()
-                $null = $state.Stopping.Remove($old)
-            }
-        }
-        $job = $state.Job
-        if (-not $job) {
-            if (-not $state.Stopping.Count) { $timer.Stop() }
-            return
-        }
-        $done = $job.Handle.IsCompleted   # read before draining, so no late output is missed
-        while ($job.Taken -lt $job.Output.Count) {
-            $item = $job.Output[$job.Taken]
-            $job.Taken++
+        $u = Update-SusScan $state.Runner
+        if (-not $u.Busy) { $timer.Stop() }
+        if ($u.State -eq 'Idle') { return }
+        foreach ($item in $u.Items) {
             $state.Results.Add($item)
             $rows.Add((ConvertTo-SusGridRow $item))
         }
         & $updateCount
-        $elapsed = '{0:mm\:ss}' -f $job.Clock.Elapsed
-        if (-not $done) {
-            $p = $job.PS.Streams.Progress
-            $what = if ($p.Count) { $p[$p.Count - 1].StatusDescription } else { 'working' }
-            $ui.StatusText.Text = "$($job.Scan): $what ... $elapsed"
-            return
-        }
-        $failed = $null
-        try { $null = $job.PS.EndInvoke($job.Handle) } catch { $failed = $_.Exception.InnerException; if (-not $failed) { $failed = $_.Exception } }
-        $errors = @($job.PS.Streams.Error)
-        $job.PS.Dispose(); $job.Runspace.Dispose()
-        $state.Job = $null
+        $elapsed = '{0:mm\:ss}' -f $u.Elapsed
+        if ($u.State -eq 'Running') { $ui.StatusText.Text = "$($u.Scan): $($u.Progress) ... $elapsed"; return }
         & $setRunning $false
-        if ($failed) { $ui.StatusText.Text = "$($job.Scan) failed: $($failed.Message)" }
-        elseif ($errors.Count) { $ui.StatusText.Text = "$($job.Scan) finished in $elapsed with an error: $($errors[0])" }
-        else { $ui.StatusText.Text = "$($job.Scan) finished in $elapsed. $($rows.Count) result(s)." }
-        $ui.SaveHtmlButton.IsEnabled = [bool](Get-SusScanOption $job.Scan).Report
+        if ($u.State -eq 'Failed') { $ui.StatusText.Text = "$($u.Scan) failed: $($u.Message)" }
+        elseif ($u.Message) { $ui.StatusText.Text = "$($u.Scan) finished in $elapsed with an error: $($u.Message)" }
+        else { $ui.StatusText.Text = "$($u.Scan) finished in $elapsed. $($rows.Count) result(s)." }
+        $ui.SaveHtmlButton.IsEnabled = [bool](Get-SusScanOption $u.Scan).Report
     })
 
     $ui.RunButton.add_Click({
-        if ($state.Job) { return }   # one scan at a time
+        if ($state.Runner.Job) { return }   # one scan at a time
         $scan = $state.Scan
         $opt = Get-SusScanOption $scan
         $scanOpt = @{ MinScore = $opt.MinScore; Days = 7; Path = $null }
@@ -384,36 +459,21 @@ function Show-SusGui {
         $rows.Clear(); $state.Results.Clear(); $state.LastScan = $scan
         $ui.DetailText.Inlines.Clear()
         $ui.SaveHtmlButton.IsEnabled = $false
-        $rs = [runspacefactory]::CreateRunspace()
-        $rs.Open()
-        $ps = [powershell]::Create()
-        $ps.Runspace = $rs
-        $null = $ps.AddScript($script:GuiScanScript).AddArgument((Join-Path $root 'SusHunt.psm1')).AddArgument($scan).AddArgument($scanOpt)
-        $output = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
-        $noInput = New-Object 'System.Management.Automation.PSDataCollection[psobject]'
-        $noInput.Complete()
-        $state.Job = @{ Scan = $scan; PS = $ps; Runspace = $rs; Output = $output; Taken = 0
-                        Clock = [Diagnostics.Stopwatch]::StartNew(); Handle = $ps.BeginInvoke($noInput, $output) }
+        $null = Start-SusScan -Runner $state.Runner -Scan $scan -Script $script:GuiScanScript `
+            -ArgumentList @((Join-Path $root 'SusHunt.psm1'), $scan, $scanOpt)
         & $setRunning $true
         $ui.StatusText.Text = "$scan`: starting..."
         $timer.Start()
     })
     $ui.CancelButton.add_Click({
-        $job = $state.Job
+        $job = Stop-SusScan $state.Runner
         if (-not $job) { return }
-        # Stop() only takes effect between pipeline steps, and a C# folder walk can take many
-        # seconds to reach one. So detach the scan now and let the timer dispose it later.
-        $null = $job.PS.BeginStop($null, $null)
-        $state.Job = $null
-        $state.Stopping.Add($job)
         & $setRunning $false
         $ui.StatusText.Text = "$($job.Scan) cancelled after {0:mm\:ss}. $($rows.Count) result(s) so far." -f $job.Clock.Elapsed
     })
     $window.add_Closing({
         $timer.Stop()
-        $all = @($state.Stopping.ToArray())
-        if ($state.Job) { $all += $state.Job }
-        foreach ($job in $all) { $null = $job.PS.BeginStop($null, $null) }   # the process exits with the window
+        $null = Stop-SusScan $state.Runner -All   # the process exits with the window
     })
 
     $null = $window.ShowDialog()

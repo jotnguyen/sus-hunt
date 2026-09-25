@@ -512,4 +512,85 @@ InModuleScope SusHunt {
             $text -match 'x:Class|x:Code|Click=' | Should Be $false
         }
     }
+
+    Describe 'gui: scan runner (real runspaces, tiny scripts)' {
+        # Polls like the window's timer does, until the state is one of $Until or 15 s pass.
+        function Wait-Scan {
+            param($Runner, [string[]]$Until)
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $items = @()
+            do {
+                $u = Update-SusScan $Runner
+                $items += $u.Items
+                if ($Until -contains $u.State) { break }
+                Start-Sleep -Milliseconds 50
+            } while ($clock.Elapsed.TotalSeconds -lt 15)
+            $u | Add-Member -NotePropertyName AllItems -NotePropertyValue $items -PassThru
+        }
+
+        It 'is idle with nothing started, and a tick does not throw on the empty cancel list' {
+            $u = Update-SusScan (New-SusScanRunner)
+            $u.State | Should Be 'Idle'
+            $u.Busy | Should Be $false
+        }
+        It 'collects every output item and finishes' {
+            $runner = New-SusScanRunner
+            Start-SusScan $runner 'T' 'param($n) 1..$n | ForEach-Object { Write-Progress -Activity a -Status "item $_"; $_ }' @(3) | Should Be $true
+            $u = Wait-Scan $runner 'Finished', 'Failed'
+            $u.State | Should Be 'Finished'
+            ($u.AllItems -join ',') | Should Be '1,2,3'
+            $u.Busy | Should Be $false
+            $runner.Job | Should BeNullOrEmpty
+        }
+        It 'passes several arguments in order, like the real scan script' {
+            $runner = New-SusScanRunner
+            $null = Start-SusScan $runner 'T' 'param($a, $b, $c) "$a|$b|$($c.Days)"' @('m.psm1', 'Files', @{ Days = 1 })
+            (Wait-Scan $runner 'Finished').AllItems | Should Be 'm.psm1|Files|1'
+        }
+        It 'refuses a second scan while one runs, then shows its progress' {
+            $runner = New-SusScanRunner
+            $null = Start-SusScan $runner 'Slow' 'Write-Progress -Activity a -Status halfway; Start-Sleep 30'
+            Start-SusScan $runner 'Other' '1' | Should Be $false
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            do { $u = Update-SusScan $runner; Start-Sleep -Milliseconds 50 } while ($u.Progress -ne 'halfway' -and $clock.Elapsed.TotalSeconds -lt 15)
+            $u.State | Should Be 'Running'
+            $u.Scan | Should Be 'Slow'
+            $u.Progress | Should Be 'halfway'
+            $null = Stop-SusScan $runner
+        }
+        It 'detaches a cancelled scan at once and frees it on a later tick' {
+            $runner = New-SusScanRunner
+            $null = Start-SusScan $runner 'Slow' 'Start-Sleep 30'
+            $job = Stop-SusScan $runner
+            $job.Scan | Should Be 'Slow'
+            $runner.Job | Should BeNullOrEmpty
+            $runner.Stopping.Count | Should Be 1
+            Start-SusScan $runner 'Next' '"next"' | Should Be $true   # Run works again right away
+            $u = Wait-Scan $runner 'Finished'
+            $u.AllItems | Should Be 'next'
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            while ($runner.Stopping.Count -and $clock.Elapsed.TotalSeconds -lt 15) { $u = Update-SusScan $runner; Start-Sleep -Milliseconds 50 }
+            $runner.Stopping.Count | Should Be 0
+            $u.Busy | Should Be $false
+        }
+        It 'returns nothing when Cancel is pressed with no scan running' {
+            Stop-SusScan (New-SusScanRunner) | Should BeNullOrEmpty
+        }
+        It 'reports a scan that throws as Failed, with the message' {
+            $runner = New-SusScanRunner
+            $null = Start-SusScan $runner 'Bad' 'throw "boom"'
+            $u = Wait-Scan $runner 'Finished', 'Failed'
+            $u.State | Should Be 'Failed'
+            $u.Message | Should Match 'boom'
+            $runner.Job | Should BeNullOrEmpty
+        }
+        It 'finishes with the first error as the message when a scan writes a non-fatal error' {
+            $runner = New-SusScanRunner
+            $null = Start-SusScan $runner 'Soft' 'Write-Error "soft"; "kept"'
+            $u = Wait-Scan $runner 'Finished', 'Failed'
+            $u.State | Should Be 'Finished'
+            $u.Message | Should Match 'soft'
+            $u.AllItems | Should Be 'kept'
+        }
+    }
 }
