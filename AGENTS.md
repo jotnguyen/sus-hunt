@@ -37,6 +37,8 @@ No dependencies, no network calls by default. It is a public repo, so git hygien
 
 - Detection only; never change security settings from code; no network calls by default; never
   run what a scan finds. The full list is in `CLAUDE.md` under Non-negotiables.
+- No AI attribution in commits or PRs (no `Co-Authored-By: Claude`). History was rewritten on
+  2026-09-25 to remove it.
 - No personal info in git: run `tools/hygiene-gate.ps1` after `git add -A`, before every commit.
 - Rules as data in `lib/Rules.ps1`, each with an ATT&CK ID and a teaching `Why`, mirrored in the
   README table.

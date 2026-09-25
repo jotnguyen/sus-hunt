@@ -44,3 +44,11 @@ force-added HTML report, each made it fail as expected. Both were unstaged and d
 
 - Human: nothing blocking. Sprint 1 can start with TICKET-001.
 - No code changed this session; the Pester suite was run only as a regression check.
+
+## 5. No AI attribution (owner decision, same day)
+
+The owner banned `Co-Authored-By: Claude` trailers, matching their other repos. Added
+`.claude/settings.json` (attribution off), a commit-message check in the hygiene gate, and a rule in
+`CLAUDE.md`. All earlier commits were rewritten with `git filter-branch --msg-filter` to drop the
+trailer, and `main` plus this branch were force-pushed with `--force-with-lease`. Commit hashes in
+older notes no longer exist.

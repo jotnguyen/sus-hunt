@@ -14,6 +14,10 @@
       3. Windows profile paths with a real user name (C:\Users\<name>\...). Placeholder names
          used in tests and docs (someone, Public, Default, All) are allowed.
       4. E-mail addresses, except noreply and example.* ones.
+    And every commit message reachable from HEAD for:
+      5. AI attribution lines (Co-Authored-By: Claude, Claude-Session:, "Generated with Claude
+         Code"). A new commit's message does not exist yet when this runs, so run the gate again
+         before pushing.
 #>
 [CmdletBinding()]
 param()
@@ -59,6 +63,13 @@ try {
                 if ($m.Value -notmatch $allowedEmail) { $problems.Add("E-MAIL ${at}: $($m.Value)") }
             }
         }
+    }
+
+    # 5. AI attribution in commit messages: this repo does not carry it (see CLAUDE.md).
+    $attributionRx = '(?im)^\s*(co-authored-by:\s*claude|claude-session:)|generated with \[?claude code'
+    foreach ($entry in @((git log --format='%h%x1f%B%x1e' HEAD) -join "`n" -split [char]0x1e)) {
+        $parts = $entry.Trim() -split [char]0x1f, 2
+        if ($parts.Count -eq 2 -and $parts[1] -match $attributionRx) { $problems.Add("ATTRIBUTION in commit $($parts[0]): $($Matches[0].Trim())") }
     }
 
     if ($problems.Count) {

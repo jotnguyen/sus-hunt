@@ -53,6 +53,10 @@ the files linked below.
 
 ## Git
 
+- **No AI attribution in git.** Never add `Co-Authored-By: Claude ...`, `Claude-Session:` or
+  "Generated with Claude Code" to commits or PR descriptions. `.claude/settings.json` turns it
+  off; strip it by hand if it appears anyway. The hygiene gate checks every commit message, so run
+  it again before pushing.
 - Branch per ticket (`ticket-NNN-<slug>`); the owner merges to `main`.
 - Commit style follows history: plain imperative subject ("Add ...", "Make ..."), no `feat:`
   prefix, body explains why, bullets for the pieces.
