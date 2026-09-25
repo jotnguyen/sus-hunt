@@ -332,7 +332,7 @@ function Show-SusGui {
     $timer.Interval = [TimeSpan]::FromMilliseconds(250)
     $timer.add_Tick({
         # Cancelled scans are detached at once and disposed here when their runspace has stopped.
-        foreach ($old in @($state.Stopping)) {
+        foreach ($old in $state.Stopping.ToArray()) {   # not @(): 5.1 throws "Argument types do not match" on this List
             if ($old.Handle.IsCompleted) {
                 try { $null = $old.PS.EndInvoke($old.Handle) } catch { Write-Verbose "cancelled scan ended: $_" }
                 $old.PS.Dispose(); $old.Runspace.Dispose()
@@ -411,7 +411,7 @@ function Show-SusGui {
     })
     $window.add_Closing({
         $timer.Stop()
-        $all = @($state.Stopping)
+        $all = @($state.Stopping.ToArray())
         if ($state.Job) { $all += $state.Job }
         foreach ($job in $all) { $null = $job.PS.BeginStop($null, $null) }   # the process exits with the window
     })
