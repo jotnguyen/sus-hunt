@@ -86,7 +86,7 @@ in docs or tests.
 - [x] `Invoke-Pester .\tests` passes, with new tests for entropy (all zeros = 0; 256 distinct
       bytes = 8), the PE parser, the Zone.Identifier parser and extension mismatch.
 - [x] `tools\hygiene-gate.ps1` prints `hygiene-ok`.
-- [ ] Human: `Copy-Item $env:windir\System32\notepad.exe $env:TEMP\invoice.pdf.exe` and
+- [x] Human: `Copy-Item $env:windir\System32\notepad.exe $env:TEMP\invoice.pdf.exe` and
       `Copy-Item $env:windir\System32\notepad.exe $env:TEMP\notes.txt`, run `files -Days 1`, and see
       DoubleExtension and ExtensionMismatch. Delete both files afterwards.
 - [ ] Human: download any installer in a browser, run `files -Days 1`, and see DownloadedExecutable
@@ -119,3 +119,6 @@ Revert the merge commit. There is no machine state to undo.
     folder walk), `-Days 1` about 50 s. Runs after the first are faster.
   - Agent check of the first human step: copies of notepad as `invoice.pdf.exe` and `notes.txt`
     in a scratch folder scored DoubleExtension and ExtensionMismatch. The human steps are still open.
+- **2026-09-25** — Merged in PR #2. The owner ran the planted-notepad check with
+  `files -Days 1 -Html`: both files showed as Medium 40 (ExtensionMismatch, DoubleExtension).
+  Still open: the browser-download check (DownloadedExecutable).
