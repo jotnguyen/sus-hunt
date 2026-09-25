@@ -114,4 +114,103 @@ InModuleScope SusHunt {
         }
         It 'scores zero with no signals' { (New-Finding -Category 'Test' -Name 'x' -Signals @()).Score | Should Be 0 }
     }
+
+    Describe 'Get-PathRisk: user-writable folders inside Windows' {
+        It 'does not trust C:\Windows\Tasks' { Get-PathRisk (Join-Path $env:windir 'Tasks\x.exe') | Should Be 'HighRisk' }
+        It 'does not trust the spool color folder' { Get-PathRisk (Join-Path $env:windir 'System32\spool\drivers\color\x.exe') | Should Be 'HighRisk' }
+        It 'still trusts System32 itself' { Get-PathRisk (Join-Path $env:windir 'System32\notepad.exe') | Should Be 'Windows' }
+    }
+
+    Describe 'signature cache' {
+        It 'does not cache a missing file' {
+            $p = Join-Path $env:TEMP ("sushunt-missing-{0}.exe" -f [guid]::NewGuid())
+            (Get-FileSignature $p).Exists | Should Be $false
+            $script:SigCache.ContainsKey($p) | Should Be $false
+        }
+        It 'caches a real file with a stamp' {
+            $p = Join-Path $env:windir 'System32\notepad.exe'
+            (Get-FileSignature $p).Status | Should Be 'Valid'
+            $script:SigCache[$p].Stamp | Should Not BeNullOrEmpty
+        }
+    }
+
+    Describe 'Resolve-BareCommand' {
+        $sys32 = Join-Path $env:windir 'System32'
+        It 'finds a System32 program first' { Resolve-BareCommand 'cmd.exe' -PathScope Machine | Should Be (Join-Path $sys32 'cmd.exe') }
+        It 'adds .exe when the name has no extension' { Resolve-BareCommand 'cmd' -PathScope Machine | Should Be (Join-Path $sys32 'cmd.exe') }
+        It 'checks the working directory before PATH' {
+            $dir = Join-Path $env:TEMP ("sushunt-wd-{0}" -f [guid]::NewGuid())
+            $null = New-Item -ItemType Directory -Path $dir
+            try {
+                $null = New-Item -ItemType File -Path (Join-Path $dir 'sushunt-test-tool.exe')
+                Resolve-BareCommand 'sushunt-test-tool.exe' -WorkingDirectory $dir -PathScope Machine | Should Be (Join-Path $dir 'sushunt-test-tool.exe')
+            } finally { Remove-Item -LiteralPath $dir -Recurse -Force }
+        }
+        It 'returns nothing for an unknown name' { Resolve-BareCommand 'no-such-program-sushunt' -PathScope Machine | Should BeNullOrEmpty }
+    }
+
+    Describe 'Get-SearchOrderSignal' {
+        It 'flags a bare name that resolved into a user folder' {
+            (Get-SearchOrderSignal 'tool.exe -x' 'C:\Users\someone\AppData\Local\Temp\tool.exe').Rule | Should Be 'BareNameWritableDir'
+        }
+        It 'ignores a full path' { Get-SearchOrderSignal 'C:\Users\someone\tool.exe' 'C:\Users\someone\tool.exe' | Should BeNullOrEmpty }
+        It 'ignores a bare name that resolved into System32' {
+            Get-SearchOrderSignal 'cmd.exe /c' (Join-Path $env:windir 'System32\cmd.exe') | Should BeNullOrEmpty
+        }
+    }
+
+    Describe 'Test-SameProcess' {
+        $me = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
+        It 'accepts the same process' {
+            Test-SameProcess ([pscustomobject]@{ PID = $PID; ProcessStart = $me.CreationDate; Path = (ConvertTo-NormalPath $me.ExecutablePath) }) | Should Be $true
+        }
+        It 'rejects a different start time (PID reuse)' {
+            Test-SameProcess ([pscustomobject]@{ PID = $PID; ProcessStart = $me.CreationDate.AddMinutes(-5); Path = $null }) | Should Be $false
+        }
+    }
+
+    Describe 'HTML report' {
+        It 'encodes values so markup in a process name stays text' {
+            $f = New-Finding -Category 'Process' -Name '<script>alert(1)</script>' -Signals @(New-Signal 'R' 20 'T1036.005' 'why & how' '<b>')
+            $html = ConvertTo-SusFindingHtml @($f)
+            $html | Should Match '&lt;script&gt;alert\(1\)&lt;/script&gt;'
+            $html | Should Not Match '<script>alert'
+            $html | Should Match 'attack.mitre.org/techniques/T1036/005/'
+        }
+        It 'renders an empty change list' { ConvertTo-SusChangeHtml @() | Should Match 'No changes since the baseline' }
+    }
+
+    Describe 'Sysmon event parsing' {
+        function New-SysmonXml($id, $data) {
+            $fields = ($data.GetEnumerator() | ForEach-Object { "<Data Name='$($_.Key)'>$($_.Value)</Data>" }) -join ''
+            "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><EventID>$id</EventID><TimeCreated SystemTime='2026-01-01T12:00:00.000Z'/></System><EventData>$fields</EventData></Event>"
+        }
+        It 'reads EventID, time and data fields' {
+            $e = ConvertFrom-SysmonEventXml (New-SysmonXml 1 @{ Image = 'C:\Windows\System32\notepad.exe'; ProcessId = '42' })
+            $e.Id | Should Be 1
+            $e.Image | Should Be 'C:\Windows\System32\notepad.exe'
+            $e.Time.ToUniversalTime().Year | Should Be 2026
+        }
+        It 'scores a document app starting a shell' {
+            $e = ConvertFrom-SysmonEventXml (New-SysmonXml 1 @{
+                Image = (Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'); ProcessId = '200'; ParentProcessId = '100'
+                ParentImage = 'C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE'; CommandLine = 'powershell.exe -NoProfile' })
+            $r = Get-SysmonEventSignals $e @{} @{}
+            @($r.Signals | ForEach-Object { $_.Rule }) -contains 'DocumentSpawnedShell' | Should Be $true
+        }
+        It 'ignores private-network connections' {
+            $e = ConvertFrom-SysmonEventXml (New-SysmonXml 3 @{ Image = 'C:\x\app.exe'; DestinationIp = '192.168.1.10'; DestinationPort = '443' })
+            Get-SysmonEventSignals $e @{} @{} | Should BeNullOrEmpty
+        }
+        It 'spots a DNS lookup repeating on a timer' {
+            $times = @{}; $alerted = @{}; $result = $null
+            foreach ($s in 0, 60, 121, 180, 241, 300, 360) {
+                $t = ([datetime]'2026-01-01T12:00:00Z').AddSeconds($s).ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+                $xml = (New-SysmonXml 22 @{ Image = 'C:\x\app.exe'; QueryName = 'updates.example.invalid' }) -replace '2026-01-01T12:00:00.000Z', $t
+                $r = Get-SysmonEventSignals (ConvertFrom-SysmonEventXml $xml) $times $alerted
+                if ($r.Type -eq 'BEACON') { $result = $r }
+            }
+            $result | Should Not BeNullOrEmpty
+        }
+    }
 }

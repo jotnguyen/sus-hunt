@@ -109,6 +109,7 @@ function New-ConnectionRow {
         Scope         = $scope
         LocalScope    = Get-IpScope $LocalAddress
         PID           = [int]$OwningProcess
+        ProcessStart  = if ($proc) { $proc.CreationDate } else { $null }
         Process       = if ($proc) { $proc.Name } else { $null }
         Path          = $path
         Signature     = if ($sig) { $sig.Status } else { 'Unknown' }
@@ -162,6 +163,24 @@ function Get-SusConnection {
     $result | Sort-Object Scope, Process, Remote
 }
 
+function Test-SameProcess {
+    # Between listing a connection and acting on it, the process can exit and Windows can hand
+    # its PID to something else. Same PID + same start time + same image = same process.
+    param($Connection)
+    $now = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$Connection.PID)" -ErrorAction SilentlyContinue
+    if (-not $now) { return $false }
+    if ($Connection.ProcessStart -and $now.CreationDate -ne $Connection.ProcessStart) { return $false }
+    if ($Connection.Path -and (ConvertTo-NormalPath $now.ExecutablePath) -ne $Connection.Path) { return $false }
+    $true
+}
+
+function Test-ConnectionStillOwned {
+    param($Connection)
+    $live = Get-NetTCPConnection -LocalAddress $Connection.LocalAddress -LocalPort $Connection.LocalPort `
+        -RemoteAddress $Connection.RemoteAddress -RemotePort $Connection.RemotePort -ErrorAction SilentlyContinue
+    [bool]($live | Where-Object { [int]$_.OwningProcess -eq [int]$Connection.PID })
+}
+
 function Stop-SusConnection {
     <#
     .SYNOPSIS
@@ -188,6 +207,7 @@ function Stop-SusConnection {
                 if ($c.Protocol -ne 'TCP' -or $c.State -eq 'Listen' -or -not $c.RemoteAddress) { Write-Error "Only established TCP connections can be reset: $label"; return }
                 if ($c.RemoteAddress.Contains(':')) { Write-Error "SetTcpEntry is IPv4 only. Use -Action BlockRemote or KillProcess for $label"; return }
                 if (-not $PSCmdlet.ShouldProcess($label, 'Reset TCP connection')) { return }
+                if (-not (Test-ConnectionStillOwned $c) -or -not (Test-SameProcess $c)) { Write-Error "Connection or process changed since it was listed; not touching it: $label"; return }
                 Initialize-SusNative
                 $rc = [SusHunt.Native]::ResetTcp(
                     (ConvertTo-NetworkOrderAddress $c.LocalAddress), (ConvertTo-NetworkOrderPort $c.LocalPort),
@@ -210,6 +230,7 @@ function Stop-SusConnection {
             }
             'KillProcess' {
                 if (-not $PSCmdlet.ShouldProcess("$($c.Process) [$($c.PID)]", 'Stop process')) { return }
+                if (-not (Test-SameProcess $c)) { Write-Error "PID $($c.PID) now belongs to a different process (or it exited); not killing it."; return }
                 Stop-Process -Id $c.PID -Force -ErrorAction Stop
                 Write-Host "Stopped $($c.Process) [$($c.PID)]"
             }

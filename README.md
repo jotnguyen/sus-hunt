@@ -15,11 +15,17 @@ Runs on the Windows PowerShell 5.1 that ships with Windows 10/11. No installs, n
 
 ```powershell
 cd sus-hunt
-.\sus-hunt.ps1 triage              # score processes + autoruns, explain the top findings (20-40 s)
-.\sus-hunt.ps1 watch -Quiet        # live: console popups, flagged processes, odd connections
+.\sus-hunt.ps1 triage -Html -Open  # score processes + autoruns, explain them, open an HTML report
+.\sus-hunt.ps1 baseline            # snapshot autoruns, listeners and programs (with SHA-256)
+.\sus-hunt.ps1 diff -Html -Open    # what changed since the newest baseline
+.\sus-hunt.ps1 watch -Quiet        # live (polling): console popups, flagged processes, odd connections
+.\sus-hunt.ps1 sysmon -Quiet       # live (event-driven) from Sysmon's log; -Hours 24 to look back
 .\sus-hunt.ps1 conns               # who is talking to whom, signed or not
 .\sus-hunt.ps1 autoruns            # every autostart entry, scored or not
 ```
+
+A good routine: take a `baseline` on a day you trust the machine, then run `diff` weekly or
+after installing something. New is more interesting than suspicious.
 
 Run from an **elevated** PowerShell for full coverage. Without admin, command lines of SYSTEM
 and elevated processes are hidden, and `watch` falls back to slower process polling.
@@ -60,6 +66,8 @@ Get-NetFirewallRule -Group SusHunt | Remove-NetFirewallRule            # undo
 | Command line | DefenderTamper / LsassDump | 50 / 70 | T1562.001 / T1003.001 | disabling AV, dumping credentials |
 | Autoruns | Run keys, Startup folder | varies | T1547.001 | the oldest persistence there is |
 | Autoruns | Scheduled tasks, MasqueradedTask | varies / 30 | T1053.005, T1036.004 | non-Microsoft programs hiding under `\Microsoft\` |
+| Autoruns | TaskWithoutSD / TaskHiddenFromApi | 60 / 40 | T1053.005 | tasks in the registry index that Task Scheduler does not show (admin) |
+| Autoruns | BareNameWritableDir | 40 | T1574.008 | a task or service runs `tool.exe` by bare name and Windows would find it in a user-writable folder |
 | Autoruns | Services, ServiceDll | varies | T1543.003 | svchost services hide their real code in a registry DLL path |
 | Autoruns | UnquotedServicePath | 15 | T1574.009 | `C:\Program Files\A B\svc.exe` makes Windows try `C:\Program.exe` first |
 | Autoruns | IFEO Debugger, SilentProcessExit | 40 | T1546.012 | "when X starts, run Y instead" |
@@ -103,6 +111,45 @@ To find the culprit, run `.\sus-hunt.ps1 watch` and wait for it to happen:
 The owner chain is the answer. (For a classic console window, `GetWindowThreadProcessId`
 reports the program running *inside* the console, not `conhost.exe`.)
 
+## Baseline and diff
+
+`baseline` saves autostart entries, listening ports and the programs currently running, each
+with a SHA-256 of its file, to `baselines\` (git-ignored). `diff` compares the machine now with
+the newest baseline and reports **Added**, **Removed** and **Changed** (different command line or
+file hash). Programs are only reported when new. Temporary UDP ports (49152 and up) are left out
+because they change constantly.
+
+Anyone who can edit the baseline file can hide a change from the next diff. If that matters to
+you, copy baselines somewhere only you can write.
+
+## HTML reports
+
+`-Html` writes a single self-contained page to `reports\` (git-ignored). `-Open` opens it. It uses
+light and dark themes, and each finding expands to show its reasons with links to ATT&CK.
+Process names and command lines come from the machine being examined, and an attacker can
+choose them, so every value is HTML-encoded before it goes into the page.
+
+## Sysmon mode
+
+[Sysmon](https://learn.microsoft.com/sysinternals/downloads/sysmon) is a free Microsoft
+Sysinternals driver and service that logs process starts, network connections and DNS queries as
+they happen. `sysmon` mode reads that log instead of polling:
+
+* nothing is missed between polls, however short-lived the process;
+* the full command line is recorded when the process starts;
+* DNS events (ID 22) let beacon tracking key on the domain, which stays the same when a CDN
+  rotates IPs.
+
+Install it yourself from the link above, as Administrator, with a community configuration such
+as SwiftOnSecurity's `sysmon-config` or Olaf Hartong's `sysmon-modular`:
+
+```powershell
+sysmon64.exe -accepteula -i sysmonconfig.xml
+```
+
+Then `.\sus-hunt.ps1 sysmon -Quiet` watches live (events are pushed by `EventLogWatcher`, not
+polled), and `.\sus-hunt.ps1 sysmon -Hours 24` scores the last day of events.
+
 ## Concepts it exercises
 
 **Networking**
@@ -139,10 +186,12 @@ reports the program running *inside* the console, not `conhost.exe`.)
 
 ## Limitations (read these)
 
-* **Polling, not a sensor.** Without admin, new processes come from WMI polling every 0.5 s,
-  so something that lives for 100 ms can slip past. With admin, `Win32_ProcessStartTrace` sees
-  every start. The window catcher polls every 100 ms, and network snapshots every 2 s miss
-  short connections. Real EDR uses kernel callbacks and ETW for exactly this reason.
+* **`watch` polls; `sysmon` does not.** Without admin, `watch` gets new processes from WMI
+  polling every 0.5 s, so something that lives for 100 ms can slip past. With admin,
+  `Win32_ProcessStartTrace` sees every start. The window catcher polls every 100 ms, and network
+  snapshots every 2 s miss short connections. Use `sysmon` mode when you can.
+* **Admin-only checks.** The hidden-task check reads Task Scheduler's registry index, which only
+  Administrators can open. Without admin it is skipped quietly.
 * **User-mode view.** A rootkit can lie to every API this uses. Signed malware exists. So do
   legitimate tools that trip every rule: installers run from Temp, dev tools are unsigned, and
   some well-known apps launch PowerShell with `-EncodedCommand`. Treat a score as a reason to
@@ -167,8 +216,10 @@ place you have decided not to look.
 Invoke-Pester .\tests      # Pester 3.4 ships with Windows; Pester 4 also works
 ```
 
-The tests cover the pure logic: CIDR matching, scopes, byte order, edit distance, command-line
-rules (including decoding `-EncodedCommand`), path parsing and beacon math.
+The tests cover the logic that does not depend on your machine's state: CIDR matching, scopes,
+byte order, edit distance, command-line rules (including decoding `-EncodedCommand`), path
+parsing and program search order, the signature cache, PID-reuse checks, HTML encoding, Sysmon
+event parsing and beacon math.
 
 ## Layout
 
@@ -180,13 +231,16 @@ lib\Common.ps1        paths, signatures, process tree, command-line parsing, sco
 lib\Processes.ps1     per-process checks
 lib\Persistence.ps1   autostart locations
 lib\Network.ps1       connections, CIDR/byte order, response actions, beacon math
-lib\Watch.ps1         live watcher
+lib\Watch.ps1         live watcher (polling)
+lib\Sysmon.ps1        Sysmon event parsing, live (event-driven) and look-back modes
+lib\Baseline.ps1      baseline and diff, parallel SHA-256
+lib\Report.ps1        HTML reports (all values encoded)
 lib\Native.ps1        the two Win32 calls PowerShell lacks (window enumeration, SetTcpEntry)
 tests\                Pester tests
 ```
 
-Reports (`-OutDir`) and watch logs describe your machine. They are git-ignored by default.
-Keep it that way.
+Reports, HTML pages, baselines and watch logs describe your machine. They are git-ignored by
+default. Keep it that way.
 
 ## License
 

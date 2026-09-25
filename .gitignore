@@ -1,7 +1,9 @@
 # Output describes the machine it ran on: never commit it.
 reports/
+baselines/
 *.csv
 *.json
+*.html
 *.log
 
 # Your personal allowlist (copy allowlist.example.txt to start one).

@@ -140,7 +140,9 @@ function Watch-SusActivity {
                 $nextNet = $now.AddSeconds(2)
                 $live = @{}
                 foreach ($c in @(Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
-                    if ($c.OwningProcess -le 4 -or @('Listen', 'Bound', 'TimeWait') -contains [string]$c.State) { continue }
+                    # Skip our own traffic: verifying signatures makes Windows fetch certificate
+                    # revocation data (OCSP/CRL) over HTTP, which would flag ourselves.
+                    if ($c.OwningProcess -le 4 -or [int]$c.OwningProcess -eq $PID -or @('Listen', 'Bound', 'TimeWait') -contains [string]$c.State) { continue }
                     $key = '{0}|{1}|{2}|{3}|{4}' -f $c.OwningProcess, $c.LocalAddress, $c.LocalPort, $c.RemoteAddress, $c.RemotePort
                     $live[$key] = $true
                     if ($netSeen.ContainsKey($key)) { continue }

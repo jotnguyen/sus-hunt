@@ -59,13 +59,17 @@ function Get-TaskFindings {
         foreach ($action in $task.Actions) {
             if (-not $action.Execute) { continue }   # COM-handler actions have no program to inspect
             $cmd = ('"{0}" {1}' -f $action.Execute.Trim('"'), $action.Arguments).Trim()
-            [pscustomobject]@{ Task = $task; Cmd = $cmd; Exe = Get-ExecutableFromCommand $cmd }
+            # Tasks running as a service account get the machine PATH, not the user's.
+            $scope = if ($task.Principal.UserId -match '^(SYSTEM|LOCAL SERVICE|NETWORK SERVICE|)$' -or $task.Principal.GroupId) { 'Machine' } else { 'User' }
+            $exe = Get-ExecutableFromCommand $cmd -WorkingDirectory $action.WorkingDirectory -PathScope $scope
+            [pscustomobject]@{ Task = $task; Cmd = $cmd; Execute = $action.Execute; Exe = $exe }
         }
     }
     Initialize-SignatureCache @($entries | ForEach-Object { $_.Exe })
     foreach ($e in $entries) {
         $task = $e.Task
         $signals = @(Get-LaunchSignals $e.Cmd $e.Exe)
+        $signals += @(Get-SearchOrderSignal $e.Execute $e.Exe)
         if ($task.TaskPath -like '\Microsoft\*' -and $e.Exe -and (Get-PathRisk $e.Exe) -ne 'Windows' -and -not (Test-MicrosoftSigned $e.Exe)) {
             $signals += New-Signal 'MasqueradedTask' 30 'T1036.004' 'Filed under \Microsoft\ in Task Scheduler but runs a non-Microsoft program. Attackers hide tasks there.' $e.Exe
         }
@@ -74,10 +78,64 @@ function Get-TaskFindings {
     }
 }
 
+function Get-RegistryTaskFindings {
+    # Task Scheduler keeps its own index in the registry. A task whose security descriptor
+    # ("SD") was removed there still runs but no longer shows in Task Scheduler or
+    # Get-ScheduledTask, so compare the two views. The key is readable by Administrators only.
+    $root = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache'
+    $hklm = [Microsoft.Win32.Registry]::LocalMachine
+    try { $tree = $hklm.OpenSubKey("$root\Tree") } catch { $tree = $null }
+    if (-not $tree) {
+        Write-Verbose 'Registry task check skipped: TaskCache needs Administrator.'
+        return
+    }
+    $visible = @{}
+    foreach ($t in Get-ScheduledTask -ErrorAction SilentlyContinue) { $visible["$($t.TaskPath)$($t.TaskName)".ToLowerInvariant()] = $true }
+
+    $stack = New-Object System.Collections.Stack
+    $stack.Push(@{ Key = $tree; Path = '' })
+    while ($stack.Count) {
+        $item = $stack.Pop()
+        foreach ($name in $item.Key.GetSubKeyNames()) {
+            $sub = $item.Key.OpenSubKey($name)
+            if (-not $sub) { continue }
+            $taskPath = "$($item.Path)\$name"
+            $id = $sub.GetValue('Id')
+            if ($id) {
+                $signals = @()
+                if ($null -eq $sub.GetValue('SD')) {
+                    $signals += New-Signal 'TaskWithoutSD' 60 'T1053.005' 'Scheduled task with its security descriptor removed from the registry, which hides it from the usual tools.' $taskPath
+                } elseif (-not $visible.ContainsKey($taskPath.ToLowerInvariant())) {
+                    $signals += New-Signal 'TaskHiddenFromApi' 40 'T1053.005' 'Present in the registry index but not returned by Get-ScheduledTask.' $taskPath
+                }
+                if ($signals.Count) {
+                    New-Finding -Category 'Task' -Name $name -Id 'Registry' -Path $null -CommandLine (Get-RegistryTaskActionText $hklm "$root\Tasks\$id") `
+                        -Context "HKLM\$root\Tree$taskPath" -Signals $signals
+                }
+            } else {
+                $stack.Push(@{ Key = $sub; Path = $taskPath })
+            }
+        }
+    }
+}
+
+function Get-RegistryTaskActionText {
+    # The Actions value is a binary blob; pulling out its UTF-16 strings is enough to show what
+    # the task runs without writing a full parser.
+    param($Hive, [string]$KeyPath)
+    try {
+        $key = $Hive.OpenSubKey($KeyPath)
+        $blob = if ($key) { [byte[]]$key.GetValue('Actions') } else { $null }
+    } catch { return $null }
+    if (-not $blob) { return $null }
+    $text = [Text.Encoding]::Unicode.GetString($blob)
+    (([regex]::Matches($text, '[\x20-\x7E]{3,}') | ForEach-Object { $_.Value }) -join ' ').Trim()
+}
+
 function Get-ServiceFindings {
     $entries = foreach ($svc in Get-CimInstance Win32_Service -ErrorAction SilentlyContinue) {
         if (-not $svc.PathName) { continue }
-        $exe = Get-ExecutableFromCommand $svc.PathName
+        $exe = Get-ExecutableFromCommand $svc.PathName -PathScope Machine
         $dll = $null
         # Shared svchost services keep their real code in a DLL named in the registry (T1543.003).
         # Plain .NET registry access: the PowerShell registry provider is ~50x slower here.
@@ -94,6 +152,7 @@ function Get-ServiceFindings {
     foreach ($e in $entries) {
         $svc = $e.Service
         $signals = @(Get-LaunchSignals $svc.PathName $e.Exe)
+        $signals += @(Get-SearchOrderSignal $svc.PathName $e.Exe)
         if (Test-UnquotedServicePath $svc.PathName) {
             $signals += New-Signal 'UnquotedServicePath' 15 'T1574.009' 'Path has spaces and no quotes, so Windows tries C:\Program.exe and friends first. Exploitable if one of those folders is writable.' $svc.PathName
         }
@@ -203,6 +262,7 @@ function Get-SusPersistenceFinding {
         'Run keys'          = { Get-RunKeyFindings }
         'Startup folders'   = { Get-StartupFolderFindings }
         'Scheduled tasks'   = { Get-TaskFindings }
+        'Task registry'     = { Get-RegistryTaskFindings }
         'Services'          = { Get-ServiceFindings }
         'Hijack points'     = { Get-HijackFindings }
         'WMI subscriptions' = { Get-WmiSubscriptionFindings }

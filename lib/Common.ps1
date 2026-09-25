@@ -66,7 +66,12 @@ function Get-PathRisk {
     if (-not $p) { return 'Unknown' }
     $l = $p.ToLowerInvariant()
     $win = $env:windir.ToLowerInvariant().TrimEnd('\')
-    if ($l -match '\\(appdata\\local\\temp|downloads|users\\public|\$recycle\.bin)\\' -or $l.StartsWith("$win\temp\")) { return 'HighRisk' }
+    if ($l -match '\\(appdata\\local\\temp|downloads|users\\public|\$recycle\.bin)\\') { return 'HighRisk' }
+    # A few folders inside Windows grant standard users create/write access, so "under
+    # C:\Windows" does not mean "only admins could have put it there".
+    foreach ($dir in $script:UserWritableWindowsDirs) {
+        if ($l.StartsWith("$win\$dir\")) { return 'HighRisk' }
+    }
     if ($l.StartsWith("$win\")) { return 'Windows' }
     if ($l -match '^[a-z]:\\program files( \(x86\))?\\') { return 'ProgramFiles' }
     if ($l -match '^[a-z]:\\(users|programdata)\\') { return 'UserWritable' }
@@ -104,10 +109,29 @@ $script:SignatureCheck = {
     }
 }
 
+function Get-FileStamp {
+    # Size + last-write time: cheap to read, and changes when an updater replaces the file.
+    param([string]$Path)
+    try {
+        $fi = New-Object IO.FileInfo $Path
+        if ($fi.Exists) { return '{0}|{1}' -f $fi.Length, $fi.LastWriteTimeUtc.Ticks }
+    } catch { }
+    $null
+}
+
 function Add-SignatureResult {
     param([string]$Path, $Raw)
+    # Never cache "missing": the file may be mid-install, and a cached miss would repeat for
+    # every later launch from that path.
+    if (-not $Raw.Exists) { $script:SigCache.Remove($Path); return }
     $signer = if ($Raw.Subject) { Get-SignerName $Raw.Subject } else { $null }
-    $script:SigCache[$Path] = [pscustomobject]@{ Status = $Raw.Status; Signer = $signer; Exists = $Raw.Exists }
+    $script:SigCache[$Path] = [pscustomobject]@{ Status = $Raw.Status; Signer = $signer; Exists = $true; Stamp = Get-FileStamp $Path }
+}
+
+function Test-SignatureCached {
+    param([string]$Path)
+    $hit = $script:SigCache[$Path]
+    $hit -and $hit.Stamp -and $hit.Stamp -eq (Get-FileStamp $Path)
 }
 
 function Initialize-SignatureCache {
@@ -115,7 +139,7 @@ function Initialize-SignatureCache {
     # checking every running program one by one can take half a minute. Use several threads.
     param([string[]]$Paths)
     $todo = @($Paths | ForEach-Object { ConvertTo-NormalPath $_ } |
-        Where-Object { $_ -and -not $script:SigCache.ContainsKey($_) } | Sort-Object -Unique)
+        Where-Object { $_ -and -not (Test-SignatureCached $_) } | Sort-Object -Unique)
     if ($todo.Count -le 2) {
         foreach ($p in $todo) { Add-SignatureResult $p (& $script:SignatureCheck $p) }
         return
@@ -142,8 +166,10 @@ function Get-FileSignature {
     param([string]$Path)
     $p = ConvertTo-NormalPath $Path
     if (-not $p) { return [pscustomobject]@{ Status = 'Unknown'; Signer = $null; Exists = $false } }
-    if (-not $script:SigCache.ContainsKey($p)) { Initialize-SignatureCache @($p) }
-    $script:SigCache[$p]
+    if (-not (Test-SignatureCached $p)) { Initialize-SignatureCache @($p) }
+    $hit = $script:SigCache[$p]
+    if ($hit) { return $hit }
+    [pscustomobject]@{ Status = 'Missing'; Signer = $null; Exists = $false }
 }
 
 function Test-MicrosoftSigned {
@@ -156,7 +182,7 @@ function Get-ExecutableFromCommand {
     # Mirrors how CreateProcess reads an unquoted command line: it tries "C:\Program.exe", then
     # "C:\Program Files\My.exe", and so on, taking the first file that exists. That search is
     # exactly what makes unquoted service paths exploitable (T1574.009).
-    param([string]$CommandLine)
+    param([string]$CommandLine, [string]$WorkingDirectory, [ValidateSet('User', 'Machine')][string]$PathScope = 'User')
     if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $null }
     $cmd = [Environment]::ExpandEnvironmentVariables($CommandLine.Trim())
     if ($cmd.StartsWith('"')) {
@@ -174,10 +200,50 @@ function Get-ExecutableFromCommand {
         $first = ConvertTo-NormalPath $tokens[0]
     }
     if ($first -match '\\') { return $first }
-    # A bare name like "sc.exe" or powershell.exe: resolve through PATH, the way a shell would.
-    $found = Get-Command $first -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($found) { return $found.Source }
+    $found = Resolve-BareCommand -Name $first -WorkingDirectory $WorkingDirectory -PathScope $PathScope
+    if ($found) { return $found }
     $first
+}
+
+function Get-CommandSearchDirs {
+    # The folders CreateProcess searches for a bare program name, in order (see the
+    # CreateProcess docs): the launcher's folder (System32 for services and tasks), the
+    # current directory, System32, the 16-bit System folder, Windows, then PATH. A service or
+    # task gets the machine PATH, not the PATH of whoever runs this script.
+    param([string]$WorkingDirectory, [ValidateSet('User', 'Machine')][string]$PathScope = 'User')
+    $sys32 = Join-Path $env:windir 'System32'
+    $dirs = @($sys32)
+    if ($WorkingDirectory) { $dirs += ConvertTo-NormalPath $WorkingDirectory }
+    $dirs += $sys32, (Join-Path $env:windir 'System'), $env:windir
+    $path = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    if ($PathScope -eq 'User') { $path = "$path;$([Environment]::GetEnvironmentVariable('Path', 'User'))" }
+    $dirs += @($path -split ';' | Where-Object { $_ } | ForEach-Object { ConvertTo-NormalPath $_ })
+    $dirs | Where-Object { $_ }
+}
+
+function Resolve-BareCommand {
+    param([string]$Name, [string]$WorkingDirectory, [ValidateSet('User', 'Machine')][string]$PathScope = 'User')
+    if (-not $Name -or $Name -match '[\\/*?]') { return $null }
+    $names = if ([IO.Path]::HasExtension($Name)) { @($Name) } else { @("$Name.exe", $Name) }
+    foreach ($dir in Get-CommandSearchDirs -WorkingDirectory $WorkingDirectory -PathScope $PathScope) {
+        foreach ($n in $names) {
+            $candidate = try { [IO.Path]::Combine($dir, $n) } catch { continue }
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        }
+    }
+    $null
+}
+
+function Get-SearchOrderSignal {
+    # A bare name ("powershell.exe") that resolves to a folder normal users can write means
+    # whoever controls that folder decides what actually runs (T1574.008).
+    param([string]$CommandLine, [string]$Executable)
+    if (-not $CommandLine -or -not $Executable) { return }
+    $first = ($CommandLine.Trim() -split '\s+')[0].Trim('"')
+    if ($first -match '\\') { return }
+    if (@('HighRisk', 'UserWritable') -contains (Get-PathRisk $Executable)) {
+        New-Signal 'BareNameWritableDir' 40 'T1574.008' "The bare name '$first' resolves to a folder standard users can write." $Executable
+    }
 }
 
 function Test-UnquotedServicePath {

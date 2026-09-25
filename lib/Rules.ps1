@@ -34,6 +34,12 @@ $script:SystemBinaries = @{
     'cscript.exe'       = @{ Dirs = @('System32', 'SysWOW64'); Parents = @() }
 }
 
+# Folders under %windir% where standard users can create files (check with Get-Acl on your build).
+$script:UserWritableWindowsDirs = @(
+    'temp', 'tasks', 'tracing', 'system32\tasks', 'system32\spool\drivers\color',
+    'system32\microsoft\crypto\rsa\machinekeys', 'syswow64\tasks'
+)
+
 # Real Windows names that sit one edit away from a name above, so the lookalike check skips them.
 $script:LookalikeExceptions = @('taskhost.exe')
 
